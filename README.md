@@ -1,5 +1,7 @@
 # Kamen SSHFS Manager
 
+[![Donate with PayPal](https://img.shields.io/badge/Donate-PayPal-0070ba?logo=paypal&logoColor=white)](https://www.paypal.com/donate/?hosted_button_id=MQFRBZWV6TD6W)
+
 A Windows desktop app for mounting remote folders over SSH as drive letters,
 built with Python and Tkinter on top of SSHFS-Win.
 
@@ -234,6 +236,13 @@ operating it.
 
 The app connects only to the SSH servers you configure, and opens download
 pages in your browser only when you click a download button.
+
+## Support
+
+Kamen SSHFS Manager is free and open source. If it's useful to you, you can
+support its development with a donation:
+
+[Donate with PayPal](https://www.paypal.com/donate/?hosted_button_id=MQFRBZWV6TD6W)
 
 ## License
 
