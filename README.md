@@ -5,6 +5,14 @@ built with Python and Tkinter on top of SSHFS-Win.
 
 The current version is in `version.json` and shown in the app's bottom bar.
 
+![Kamen SSHFS Manager main window with two mounted connections](images/main.jpg)
+
+## Screenshots
+
+| New connection | Settings |
+|:---:|:---:|
+| ![Connection details form with Test Connection and Browse](images/new_connection.jpg) | ![Settings window with theme, startup and logging options](images/settings.jpg) |
+
 ## Features
 
 - Add, edit and delete SSH connections
@@ -48,10 +56,10 @@ current Windows 10/11.
 ### 2. Python dependencies
 
 ```
-pip install pillow pystray paramiko
+pip install -r requirements.txt
 ```
 
-Python 3.9+ required.
+Python 3.9+ required (release builds use 3.11).
 
 ## Usage
 
@@ -149,14 +157,25 @@ IPv6 address instead of its IPv4 one) counts as a new host.
 
 ## Building the .exe
 
+Official releases are built by GitHub Actions
+([`.github/workflows/release.yml`](.github/workflows/release.yml)) on GitHub's
+Windows servers, signed through SignPath, and attached to a GitHub Release.
+Pushing a tag that matches `version.json` (e.g. `v1.5.0`) starts a release
+build. Each release includes `SHA256SUMS.txt` for verifying the download.
+
+To build the same exe yourself:
+
 ```
-pip install pyinstaller
-pyinstaller --onefile --windowed --name "Kamen SSHFS Manager" --icon icon.ico --add-data "version.json;." --exclude-module numpy kamen_sshfs_manager.py
+pip install -r requirements.txt pyinstaller==6.17.0
+python tools/make_version_info.py
+pyinstaller --onefile --windowed --name "Kamen SSHFS Manager" --icon icon.ico --add-data "version.json;." --exclude-module numpy --version-file version_info.txt kamen_sshfs_manager.py
 ```
 
 The exe is written to `dist\Kamen SSHFS Manager.exe`.
 
-- `--add-data "version.json;."` bundles the version file, so the exe shows the
+- `tools/make_version_info.py` writes `version_info.txt` from `version.json`,
+  so the exe's Windows properties show the product name and version.
+- `--add-data "version.json;."` bundles the version file, so the app shows the
   right version.
 - `--exclude-module numpy` leaves out numpy, which Pillow pulls in but the app
   doesn't use (saves ~12 MB).
@@ -178,6 +197,43 @@ All in `%APPDATA%\kamen-sshfs-manager\`:
 
 "Start with Windows" is stored as a `Kamen SSHFS Manager` entry under
 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
+
+## Uninstall
+
+The app is a single exe with no installer. To remove it completely:
+
+1. Open the app, click **Disconnect All**, then in **⚙ Settings** untick
+   **Start with Windows** and click **Save**.
+2. Exit the app and delete `Kamen SSHFS Manager.exe`.
+3. Delete the folder `%APPDATA%\kamen-sshfs-manager` (saved connections and
+   settings).
+
+Host keys you chose to trust are kept in `%USERPROFILE%\.ssh\known_hosts`,
+which is shared with other SSH tools; remove those lines only if you no longer
+need them.
+
+## Code Signing Policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io),
+certificate by [SignPath Foundation](https://signpath.org).
+
+| Role                     | Members        |
+|--------------------------|----------------|
+| Committers and reviewers | Irnes Karaduz  |
+| Approvers                | Irnes Karaduz  |
+
+Release builds are produced only by the GitHub Actions workflow in this
+repository from the tagged source code, and every signing request is approved
+manually.
+
+## Privacy
+
+This program will not transfer any information to other networked systems
+unless specifically requested by the user or the person installing or
+operating it.
+
+The app connects only to the SSH servers you configure, and opens download
+pages in your browser only when you click a download button.
 
 ## License
 
