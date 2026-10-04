@@ -107,7 +107,6 @@ def get_available_drives():
     used = {f"{c}:" for c in string.ascii_uppercase if os.path.exists(f"{c}:\\")}
     return [f"{c}:" for c in string.ascii_uppercase[3:] if f"{c}:" not in used]
 
-# ── DPAPI password encryption ───────────────────────────────────────────────────
 
 class _DATA_BLOB(ctypes.Structure):
     _fields_ = [("cbData", wt.DWORD), ("pbData", ctypes.POINTER(ctypes.c_byte))]
@@ -149,13 +148,12 @@ def _dpapi_decrypt(token: str) -> str:
         raise ctypes.WinError()
     return _blob_to_bytes(dst).decode("utf-8")
 
-# ── Data ────────────────────────────────────────────────────────────────────────
 
 SETTINGS_PATH = CONFIG_PATH.parent / "settings.json"
 DEFAULT_SETTINGS = {"theme": "dark", "log_enabled": True, "start_minimized": True}
 
 # "Start with Windows" lives in the registry, not settings.json, so it stays
-# correct if the user turns it off in Task Manager → Startup.
+# correct if the user turns it off in Task Manager -> Startup.
 RUN_KEY  = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_NAME = "Kamen SSHFS Manager"
 STARTUP_ARG = "--startup"
@@ -234,7 +232,6 @@ def new_connection():
             "password": "", "key_path": "", "extra_args": "",
             "auto_connect": False, "verify_host_key": False}
 
-# ── SSHFS backend ───────────────────────────────────────────────────────────────
 
 _procs = {}
 
@@ -269,7 +266,7 @@ def _notify_explorer_drive_change(drive: str, added: bool):
             shell32.SHChangeNotify(ev, SHCNF_PATHW | SHCNF_FLUSH, path, None)
 
         # Broadcast device-change to top-level windows (this is what Windows
-        # itself sends when physical media changes — Explorer listens for it).
+        # itself sends when physical media changes - Explorer listens for it).
         WM_DEVICECHANGE              = 0x0219
         DBT_DEVICEARRIVAL            = 0x8000
         DBT_DEVICEREMOVECOMPLETE     = 0x8004
@@ -351,7 +348,6 @@ def missing_requirements():
         missing.append(("SSHFS-Win", SSHFS_WIN_URL))
     return missing
 
-# ── SSH probe (Test Connection / remote folder browser) ─────────────────────────
 # ssh.exe can't take a password non-interactively, so probing uses paramiko.
 
 def _password_auth(transport, user, password, prompt):
@@ -391,7 +387,7 @@ def _password_auth(transport, user, password, prompt):
         transport.auth_interactive(user, handler)
 
 class _AskHostKeyPolicy:
-    """Unknown host key → ask via `prompt`; if trusted, append it to known_hosts."""
+    """Unknown host key -> ask via `prompt`; if trusted, append it to known_hosts."""
     def __init__(self, prompt, known_hosts):
         self.prompt, self.known_hosts = prompt, known_hosts
     def missing_host_key(self, client, hostname, key):
@@ -412,7 +408,7 @@ class SSHProbe:
     Raises RuntimeError with a human-readable message on failure."""
 
     def __init__(self, conn, password=None, timeout=10, prompt=None):
-        """`prompt(kind, text)` → answer or None; kind is "confirm", "secret"
+        """`prompt(kind, text)` -> answer or None; kind is "confirm", "secret"
         or "text". Called from this (worker) thread for 2FA questions and
         unknown host keys; without it those fail as before."""
         try:
@@ -494,7 +490,6 @@ class SSHProbe:
         try: self.client.close()
         except Exception: pass
 
-# ── SSH terminal ────────────────────────────────────────────────────────────────
 
 def bare_host(host):
     """Host without surrounding [brackets], which users may type for IPv6."""
@@ -598,9 +593,9 @@ def _saved_password_already_tried():
 
 def _askpass_main(prompt):
     """Answer one ssh prompt (ssh runs this app as SSH_ASKPASS):
-    • host-key "(yes/no)?" questions → Trust / Cancel popup
-    • password prompts → the saved password (once per ssh process)
-    • anything else (2FA codes, passphrases, Ask Each Time) → input popup
+    - host-key "(yes/no)?" questions -> Trust / Cancel popup
+    - password prompts -> the saved password (once per ssh process)
+    - anything else (2FA codes, passphrases, Ask Each Time) -> input popup
     Cancel exits 1, which ssh treats as no answer."""
     cid = os.environ.get(ASKPASS_ENV, "")
     conn = next((c for c in load_connections() if c.get("id") == cid), {}) or {}
@@ -727,14 +722,14 @@ def connect(conn, log=None):
         "-ofollow_symlinks",
     ]
     # Debug logging is opt-in per connection (extra_args: "-odebug -ologlevel=debug1")
-    # Default-on debug was making file ops synchronous → 38MB took forever and
+    # Default-on debug was making file ops synchronous -> 38MB took forever and
     # the log flood froze the UI.
 
     if not conn.get("verify_host_key", False):
         args += ["-oStrictHostKeyChecking=no", "-oUserKnownHostsFile=/dev/null"]
 
     # All prompts (password, 2FA codes, key passphrases, new host keys) go to
-    # ssh's SSH_ASKPASS helper — this app — which answers with the saved
+    # ssh's SSH_ASKPASS helper - this app - which answers with the saved
     # password or asks the user in a popup.
     if auth in ("password", "ask"):
         args += ["-oPreferredAuthentications=password,keyboard-interactive"]
@@ -773,16 +768,16 @@ def connect(conn, log=None):
         _procs[cid] = proc
 
         result = [None]    # success flag set when mount is detected
-        mounted = [False]  # flips True after mount — we stop logging then
+        mounted = [False]  # flips True after mount - we stop logging then
 
         def stream(pipe, prefix):
             """Log lines while the mount is being established. Once mounted,
-            keep draining the pipe silently — if we don't read it, sshfs blocks
+            keep draining the pipe silently - if we don't read it, sshfs blocks
             on full OS pipe buffers and file ops grind to a halt."""
             try:
                 for line in pipe:
                     if mounted[0]:
-                        continue  # drain only — no UI dispatch
+                        continue  # drain only - no UI dispatch
                     txt = line.decode(errors="replace").rstrip()
                     if "service sshfs has been started" in txt:
                         result[0] = True
@@ -845,7 +840,7 @@ def _find_sshfs_pids_for_drive(drive: str):
             continue
         pid, cmdline = row[0], row[1] or ""
         # Match the drive letter as a standalone token in the command line
-        # e.g. "... user@host:/path Z: -p22 ..."  →  match " Z: " or trailing " Z:"
+        # e.g. "... user@host:/path Z: -p22 ..."  ->  match " Z: " or trailing " Z:"
         cl = cmdline.upper()
         token = f" {drive_letter}:"
         if (token + " ") in (cl + " ") and pid.isdigit() and pid != "0":
@@ -881,7 +876,7 @@ def disconnect(conn, log=None):
     # 2. If still mounted (e.g. orphaned from a previous run), find sshfs
     #    processes whose command line targets THIS drive specifically.
     #    (sshfs normally daemonizes after mounting, so the tracked process
-    #    has usually exited already — only wait if we actually stopped it.)
+    #    has usually exited already - only wait if we actually stopped it.)
     if not _wait_unmounted(drive, 1.0 if terminated else 0):
         pids = _find_sshfs_pids_for_drive(drive)
         for pid in pids:
@@ -898,7 +893,6 @@ def disconnect(conn, log=None):
         _notify_explorer_drive_change(drive, added=False)
     return not mounted
 
-# ── Mouse wheel binding (widget-scoped, no bind_all leakage) ────────────────────
 
 def _bind_mousewheel(widget, on_scroll, container=None):
     """Route mousewheel events to `widget` whenever the cursor is over it
@@ -922,10 +916,9 @@ def _bind_mousewheel(widget, on_scroll, container=None):
     target.bind("<Enter>", enter)
     target.bind("<Leave>", leave)
 
-# ── Logo ────────────────────────────────────────────────────────────────────────
 
 def _make_logo(size: int = 64):
-    """Stylized 'K' monogram — dark rounded square + accent-blue letterform.
+    """Stylized 'K' monogram - dark rounded square + accent-blue letterform.
     Returns a PIL Image, or None if PIL is unavailable.
     PIL's ImageDraw doesn't anti-alias, so draw at 8x and downsample with
     LANCZOS to get smooth diagonals and corners."""
@@ -964,14 +957,14 @@ def _draw_logo(size: int, ss: int = 1):
     # Vertical stem
     d.rounded_rectangle((stem_x, top, stem_x + stem_w, bot),
                         radius=stem_w/2, fill=LOGO_BLUE)
-    # Upper diagonal (mid-right of stem → top-right)
+    # Upper diagonal (mid-right of stem -> top-right)
     d.polygon([
         (stem_x + stem_w*0.6, mid_y - stem_w*0.4),
         (apex_x - stem_w*0.6, top),
         (apex_x + stem_w*0.4, top + stem_w*0.6),
         (stem_x + stem_w*1.4, mid_y + stem_w*0.4),
     ], fill=LOGO_BLUE)
-    # Lower diagonal (mid-right of stem → bottom-right)
+    # Lower diagonal (mid-right of stem -> bottom-right)
     d.polygon([
         (stem_x + stem_w*0.6, mid_y + stem_w*0.4),
         (stem_x + stem_w*1.4, mid_y - stem_w*0.4),
@@ -980,7 +973,6 @@ def _draw_logo(size: int, ss: int = 1):
     ], fill=LOGO_BLUE)
     return img
 
-# ── UI helpers ──────────────────────────────────────────────────────────────────
 
 def mk_btn(parent, text, cmd, bg=None, fg=None, width=None, active_fg=None):
     if bg is None: bg = BG_INPUT
@@ -1034,7 +1026,6 @@ def mk_label(parent, text, fg=None, font=FONT, **kw):
     if fg is None: fg = FG
     return tk.Label(parent, text=text, bg=bg, fg=fg, font=font, **kw)
 
-# ── Login prompt popup ──────────────────────────────────────────────────────────
 
 class PromptDialog(tk.Toplevel):
     """Popup for an SSH question. kind: "confirm" (trust a host key),
@@ -1115,7 +1106,6 @@ def prompt_from_thread(widget, subtitle=""):
         return res[0]
     return prompt
 
-# ── Tooltip ─────────────────────────────────────────────────────────────────────
 
 class Tooltip:
     """Small hover tooltip: appears after `delay` ms over `widget`, hides on leave."""
@@ -1162,10 +1152,9 @@ class Tooltip:
             self._tip.destroy()
             self._tip = None
 
-# ── Dark Scrollbar ───────────────────────────────────────────────────────────────
 
 class DarkScrollbar(tk.Canvas):
-    """Slim dark scrollbar — replaces the white default ttk one."""
+    """Slim dark scrollbar - replaces the white default ttk one."""
     def __init__(self, parent, command, autohide=True, **kw):
         super().__init__(parent, width=8, bg=BG_CARD, highlightthickness=0, **kw)
         self._command = command
@@ -1232,7 +1221,6 @@ def show_centered(win, parent, size=None):
     win.grab_set()
     win.focus_set()
 
-# ── Connection Card ──────────────────────────────────────────────────────────────
 
 class Card(tk.Frame):
     def __init__(self, parent, conn, mgr):
@@ -1268,7 +1256,7 @@ class Card(tk.Frame):
         bf.pack(side="right", padx=10)
         mk_btn(bf, "SSH", self._ssh, bg=SSH_BG).pack(side="left", padx=3)
         self.btn_con = mk_btn(bf, "Connect", self._toggle, bg=ACCENT, fg="white")
-        # Keep text white even when disabled (e.g. during "Connecting…")
+        # Keep text white even when disabled (e.g. during "Connecting...")
         self.btn_con.configure(disabledforeground="white")
         self.btn_con.pack(side="left", padx=3)
         mk_btn(bf, "Edit", self._edit).pack(side="left", padx=3)
@@ -1285,7 +1273,7 @@ class Card(tk.Frame):
 
     def _set(self, status):
         if status == self._status:
-            return  # no-op when unchanged — avoids flicker from poll loop
+            return  # no-op when unchanged - avoids flicker from poll loop
         self._status = status
         dot_colors = {"connected": SUCCESS, "connecting": WARNING,
                       "disconnected": FG_MUTED, "error": DANGER}
@@ -1363,7 +1351,6 @@ class Card(tk.Frame):
         self.lbl_drive.configure(text=conn["drive_letter"])
         self._refresh()
 
-# ── Edit Dialog ──────────────────────────────────────────────────────────────────
 
 class EditDialog(tk.Toplevel):
     def __init__(self, parent, conn, on_save):
@@ -1382,7 +1369,7 @@ class EditDialog(tk.Toplevel):
     def _build(self):
         mk_label(self, "Connection Details", font=FONT_LARGE).pack(pady=(14,6))
 
-        # Form (no scrollbar — dialog is sized to fit all fields)
+        # Form (no scrollbar - dialog is sized to fit all fields)
         form = tk.Frame(self, bg=BG)
         form.pack(fill="both", expand=True)
         form.columnconfigure(1, weight=1)
@@ -1694,7 +1681,6 @@ class EditDialog(tk.Toplevel):
         self.on_save(self.conn)
         self.destroy()
 
-# ── Remote Folder Browser ───────────────────────────────────────────────────────
 
 class RemoteBrowser(tk.Toplevel):
     """Navigate the server's folders over SFTP and pick one for Remote Path.
@@ -1852,7 +1838,6 @@ class RemoteBrowser(tk.Toplevel):
             threading.Thread(target=self._probe.close, daemon=True).start()
         self.destroy()
 
-# ── Settings Dialog ─────────────────────────────────────────────────────────────
 
 class SettingsDialog(tk.Toplevel):
     def __init__(self, parent, settings, on_save):
@@ -1919,7 +1904,6 @@ class SettingsDialog(tk.Toplevel):
         self.destroy()
         self.on_save(self.settings)
 
-# ── Shutdown Dialog ─────────────────────────────────────────────────────────────
 
 class ShutdownDialog(tk.Toplevel):
     """Shown on Exit while drives unmount in background threads. Calls
@@ -1995,7 +1979,6 @@ class ShutdownDialog(tk.Toplevel):
         self._closed = True
         self.on_done()
 
-# ── Main Window ──────────────────────────────────────────────────────────────────
 
 class App(tk.Tk):
     def __init__(self):
@@ -2049,7 +2032,7 @@ class App(tk.Tk):
             from PIL import ImageTk
         except Exception:
             return
-        # Multiple sizes — Tk picks the best for each context (title bar uses
+        # Multiple sizes - Tk picks the best for each context (title bar uses
         # ~16px, taskbar ~32px, Alt-Tab ~48px).
         imgs = []
         for sz in (16, 32, 48, 64):
@@ -2060,7 +2043,7 @@ class App(tk.Tk):
             return
         self._icon_imgs = imgs  # keep refs alive
         try:
-            self.iconphoto(True, *imgs)  # default=True → applies to Toplevels too
+            self.iconphoto(True, *imgs)  # default=True -> applies to Toplevels too
         except Exception:
             pass
 
@@ -2112,7 +2095,7 @@ class App(tk.Tk):
         bar.pack(fill="x", side="bottom")
         bar.pack_propagate(False)
 
-        # Right side: Exit, then Minimize to Tray, then version (packed right→left)
+        # Right side: Exit, then Minimize to Tray, then version (packed right->left)
         mk_btn(bar, "Exit", self._on_close, bg=EXIT_BG).pack(side="right", padx=(4, 12), pady=6)
         mk_btn(bar, "Minimize to Tray", self._minimize_to_tray,
                bg=TRAY_BG).pack(side="right", padx=4, pady=6)
@@ -2190,7 +2173,7 @@ class App(tk.Tk):
                                       padx=(12, 8), pady=8)
         mk_btn(self._req_banner, "Re-check", self._recheck_requirements).pack(
             side="right", padx=(4, 10), pady=8)
-        for name, url in reversed(missing):  # packed right→left
+        for name, url in reversed(missing):  # packed right->left
             mk_btn(self._req_banner, f"Get {name}",
                    lambda u=url: self._open_url(u), bg=WARNING, fg=BG).pack(
                 side="right", padx=4, pady=8)
@@ -2340,8 +2323,6 @@ class App(tk.Tk):
         try: self.after(delay, w)
         except RuntimeError: pass  # app closed
 
-    # ── Settings ──
-
     def _open_settings(self):
         current = dict(self._settings, start_with_windows=bool(get_start_with_windows()))
         SettingsDialog(self, current, self._apply_settings)
@@ -2383,7 +2364,7 @@ class App(tk.Tk):
         self._log_visible = False
         self._build()
         self._render()
-        for cid, st in statuses.items():  # keep e.g. "Connecting…" across the rebuild
+        for cid, st in statuses.items():  # keep e.g. "Connecting..." across the rebuild
             if cid in self._cards:
                 self._cards[cid]._set(st)
         self.check_requirements(log_missing=False)
