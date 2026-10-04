@@ -30,9 +30,9 @@ jobs:
       SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
@@ -55,7 +55,7 @@ jobs:
 
       - name: Upload unsigned exe
         id: upload-unsigned
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: unsigned
           path: dist/${{ env.APP_NAME }}.exe
@@ -84,7 +84,7 @@ jobs:
           "$hash  $env:APP_NAME.exe" | Out-File release/SHA256SUMS.txt -Encoding ascii
 
       - name: Upload release files
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: release
           path: release/
