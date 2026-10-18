@@ -36,7 +36,7 @@ connections, 2FA support and automatic reconnect.
 - Debug log panel with Copy Log / Clear Log (can be turned off in Settings)
 - Checks for WinFsp and SSHFS-Win on startup and links to the downloads
 - Exit disconnects all drives in the background with a progress window
-- Open a mounted drive in Explorer
+- Open a mounted drive in Explorer by clicking its drive tile (e.g. `I:\`)
 - Live status polling (every 5 s) that can't freeze the app, with
   **Restart** / **Kill** for a drive that stops responding
 - Automatic reconnect when the network drops; one copy of the app at a time

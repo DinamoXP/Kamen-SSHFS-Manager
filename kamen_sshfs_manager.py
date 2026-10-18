@@ -1515,6 +1515,12 @@ def show_centered(win, parent, size=None):
     win.focus_set()
 
 
+def _blend(c1, c2, t):
+    """Mix two #rrggbb colours: t=0 gives c1, t=1 gives c2."""
+    a = [int(c1[i:i + 2], 16) for i in (1, 3, 5)]
+    b = [int(c2[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#" + "".join(f"{round(x + (y - x) * t):02x}" for x, y in zip(a, b))
+
 class Card(tk.Frame):
     def __init__(self, parent, conn, mgr):
         super().__init__(parent, bg=BG_CARD,
@@ -1524,11 +1530,22 @@ class Card(tk.Frame):
         self._build()
         self._refresh()
 
+    TILE = 44
+
     def _build(self):
-        # Dot
-        self.cv = tk.Canvas(self, width=14, height=14, bg=BG_CARD, highlightthickness=0)
-        self.cv.pack(side="left", padx=(14,8), pady=16)
-        self._dot = self.cv.create_oval(2,2,12,12, fill=FG_MUTED, outline="")
+        # Drive letter tile; its colour shows the status
+        t = self.TILE
+        self.cv = tk.Canvas(self, width=t, height=t, bg=BG_CARD, highlightthickness=0)
+        self.cv.pack(side="left", padx=(12, 12), pady=10)
+        r, x0, y0, x1, y1 = 9, 1, 1, t - 1, t - 1
+        pts = [x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r, x1, y1 - r, x1, y1,
+               x1 - r, y1, x0 + r, y1, x0, y1, x0, y1 - r, x0, y0 + r, x0, y0]
+        self._tile = self.cv.create_polygon(pts, smooth=True, width=1.5,
+                                            fill=BG_INPUT, outline=BORDER)
+        self._tile_text = self.cv.create_text(t / 2, t / 2, text=self.conn["drive_letter"] + "\\",
+                                              fill=FG_MUTED, font=("Consolas", 13, "bold"))
+        self.cv.bind("<Button-1>", lambda e: self._open())  # click the tile to open the drive
+        Tooltip(self.cv, "Open in Explorer")
 
         # Info
         info = tk.Frame(self, bg=BG_CARD)
@@ -1540,9 +1557,8 @@ class Card(tk.Frame):
         self.lbl_host = mk_label(host_row, self._host_part(), fg=FG_MUTED,
                                  font=FONT_SMALL, anchor="w")
         self.lbl_host.pack(side="left")
-        self.lbl_drive = mk_label(host_row, self.conn["drive_letter"],
-                                  fg=SUCCESS, font=FONT_BOLD, anchor="w")
-        self.lbl_drive.pack(side="left", padx=(2, 0))
+        self.lbl_drive = mk_label(host_row, "", fg=WARNING, font=FONT_SMALL, anchor="w")
+        self.lbl_drive.pack(side="left", padx=(8, 0))  # "not responding" when hung
 
         # Buttons
         bf = tk.Frame(self, bg=BG_CARD)
@@ -1567,7 +1583,7 @@ class Card(tk.Frame):
 
     def _host_part(self):
         c = self.conn
-        return f"{c['user']}@{c['host']}  ·  port {c.get('port', 22)}  →  "
+        return f"{c['user']}@{c['host']}  ·  port {c.get('port', 22)}"
 
     def _refresh(self):
         """Uses the poll worker's cached state; never touches the drive."""
@@ -1584,13 +1600,16 @@ class Card(tk.Frame):
         self._status = status
         dot_colors = {"connected": SUCCESS, "connecting": WARNING, "stopping": WARNING,
                       "hung": WARNING, "disconnected": FG_MUTED, "error": DANGER}
-        self.cv.itemconfig(self._dot, fill=dot_colors.get(status, FG_MUTED))
-        drive = self.conn["drive_letter"]
+        color = dot_colors.get(status, FG_MUTED)
+        self.cv.itemconfig(self._tile, fill=_blend(BG_CARD, color, 0.16),
+                           outline=_blend(BG_CARD, color, 0.6))
+        self.cv.itemconfig(self._tile_text, fill=color, text=self.conn["drive_letter"] + "\\")
+        self.cv.configure(cursor="hand2" if status == "connected" else "")
         if status == "hung":
-            self.lbl_drive.configure(text=f"{drive}  not responding", fg=WARNING)
+            self.lbl_drive.configure(text="not responding")
             self.btn_kill.pack(side="left", padx=3, after=self.btn_con)
         else:
-            self.lbl_drive.configure(text=drive, fg=SUCCESS)
+            self.lbl_drive.configure(text="")
             self.btn_kill.pack_forget()
         if status == "hung":
             self.btn_con.configure(text="Restart", bg=WARNING, fg="white", state="normal")
@@ -1690,7 +1709,7 @@ class Card(tk.Frame):
         self.conn = conn
         self.lbl_name.configure(text=conn["name"])
         self.lbl_host.configure(text=self._host_part())
-        self.lbl_drive.configure(text=conn["drive_letter"])
+        self.cv.itemconfig(self._tile_text, text=conn["drive_letter"] + "\\")
         self._refresh()
 
 
