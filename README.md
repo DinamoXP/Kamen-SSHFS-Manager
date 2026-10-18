@@ -13,7 +13,7 @@ connections, 2FA support and automatic reconnect.
 
 | New connection | Settings |
 |:---:|:---:|
-| ![Connection details form with Test Connection and Browse](images/new_connection.jpg) | ![Settings window with theme, startup and logging options](images/settings.jpg) |
+| ![Connection details form with Test Connection and Browse](images/new_connection.jpg) | ![Settings window with theme, startup, drive and logging options](images/settings.jpg) |
 
 ## Features
 
