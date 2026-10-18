@@ -2,10 +2,10 @@
 
 [![Donate with PayPal](https://img.shields.io/badge/Donate-PayPal-0070ba?logo=paypal&logoColor=white)](https://www.paypal.com/donate/?hosted_button_id=MQFRBZWV6TD6W)
 
-A Windows desktop app for mounting remote folders over SSH as drive letters,
-built with Python and Tkinter on top of SSHFS-Win.
-
-The current version is in `version.json` and shown in the app's bottom bar.
+A Windows app for working with your SSH servers: mount remote folders as drive
+letters, open SSH tunnels to web panels and databases, browse through a SOCKS
+proxy, and open a terminal in one click. Built on SSHFS-Win, with saved
+connections, 2FA support and automatic reconnect.
 
 ![Kamen SSHFS Manager main window with two mounted connections](images/main.jpg)
 
