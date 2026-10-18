@@ -24,9 +24,11 @@ The current version is in `version.json` and shown in the app's bottom bar.
 - Interactive login (2FA codes) and a **Trust this server?** prompt for new host keys
 - Passwords encrypted with Windows DPAPI (readable only by your Windows account)
 - **Test Connection** and a remote folder browser for picking the remote path
-- Drive letter selector (D: – Z:), custom port, extra SSHFS arguments
+- Drive letter selector (D: - Z:), custom port, extra SSHFS arguments
 - **SSH** button: opens a terminal session in the connection's remote folder,
   using the saved password automatically
+- **SSH tunnels**: reach web panels and databases on the server, or browse
+  through it with a SOCKS proxy (see [SSH Tunnels](#ssh-tunnels))
 - Connect automatically when the app starts (per connection)
 - Start with Windows, minimized to the tray (on by default); auto-connect
   retries for about a minute at login while the network comes up
@@ -35,7 +37,9 @@ The current version is in `version.json` and shown in the app's bottom bar.
 - Checks for WinFsp and SSHFS-Win on startup and links to the downloads
 - Exit disconnects all drives in the background with a progress window
 - Open a mounted drive in Explorer
-- Live status polling (every 5 s)
+- Live status polling (every 5 s) that can't freeze the app, with
+  **Restart** / **Kill** for a drive that stops responding
+- Automatic reconnect when the network drops; one copy of the app at a time
 - Hover over the version in the bottom bar to see the build date and time
 
 ## Requirements
@@ -78,7 +82,8 @@ Open with the **⚙ Settings** button. Defaults are shown in bold.
 | Appearance              | **Dark** / Light                                    |
 | Start with Windows      | **On** / Off (enabled on first run of the exe)      |
 | Start minimized to tray | **On** / Off (applies when Windows starts the app)  |
-| Enable debug log        | **On** / Off                                        |
+| Restart a drive that stops responding | On / **Off** (after 60 s; interrupts any copy still running on that drive) |
+| Enable debug log        | **On** / Off (also written to `kamen.log`)          |
 
 ## Host Addresses
 
@@ -90,7 +95,7 @@ with or without square brackets:
 | `server.lan`                     | Hostname (IPv4 or IPv6, whichever it resolves to) |
 | `192.168.1.10`                   | IPv4                                          |
 | `2001:db8::5` or `[2001:db8::5]` | Global IPv6                                   |
-| `fe80::1%12`                     | Link-local IPv6 — needs the `%` interface number |
+| `fe80::1%12`                     | Link-local IPv6 - needs the `%` interface number |
 
 The app adds the brackets sshfs needs for IPv6 automatically. Link-local
 (`fe80::`) addresses only work on the local network and need the interface
@@ -136,25 +141,70 @@ IPv6 address instead of its IPv4 one) counts as a new host.
 
 | How the connect starts                          | Retries                                           |
 |-------------------------------------------------|---------------------------------------------------|
-| Windows login ("Start with Windows" + a connection set to connect automatically) | 6 attempts, 10 s apart — about 1 minute if the network is down, up to ~2½ minutes if each attempt has to time out |
+| Windows login ("Start with Windows" + a connection set to connect automatically) | 6 attempts, 10 s apart - about 1 minute if the network is down, up to ~2½ minutes if each attempt has to time out |
 | App started manually, or **Connect** clicked    | 1 attempt, no retry                               |
 
 **When the connection drops while a drive is mounted**
 
-1. Nothing notices right away — no keep-alive checks are configured.
-2. Opening files or folders on the drive hangs until Windows gives up on the
-   network connection (one to several minutes).
-3. ssh exits, the drive disappears, and the card shows **Disconnected**
-   within 5 seconds (status is polled every 5 s).
-4. The app does **not** reconnect on its own — click **Connect** again.
+sshfs sends a keep-alive every 15 s and treats the link as dead after 3 missed
+replies (about 45 s). It then reconnects by itself, using the saved password or
+asking in a popup, and the drive keeps its letter.
+
+**When a drive stops responding**
+
+If the sshfs process behind a drive stops answering (the drive is there, but
+opening it hangs), the app notices within about 10 seconds:
+
+- The card shows **"not responding"** next to the drive letter, with
+  **Restart** (kill the mount and mount it again) and **Kill** buttons.
+- A tray notification and a `[HUNG]` log line say which drive and which sshfs
+  process.
+- The rest of the app keeps working, and the app still opens normally while a
+  drive is stuck.
+- With **Restart a drive that stops responding** turned on in Settings, the
+  app restarts it by itself after 60 seconds.
+
+Only one copy of the app runs at a time. Opening it again brings the running
+window to the front.
+
+## SSH Tunnels
+
+Click **Tunnels** on a connection's card to manage its tunnels. The button shows
+how many are running, e.g. **Tunnels (2)**.
+
+| Tunnels | + Add Tunnel |
+|:---:|:---:|
+| ![Tunnels window with a web panel, a database and a SOCKS proxy](images/tunnels.jpg) | ![New Tunnel dialog with the Portainer preset](images/new_tunnel.jpg) |
+
+| Type | Use it for | How to use it |
+|---|---|---|
+| **Web panel / database** | A service on the server (or on a machine the server can reach) that isn't open to your network | Open `127.0.0.1:<local port>` on this PC. **Open** starts your browser; for databases, **Copy** copies the address for your database client |
+| **SOCKS proxy** | Browsing through the server | Set your browser's proxy to **SOCKS5**, host `127.0.0.1`, the tunnel's local port |
+
+Presets fill in common ports: Web panel (8080 -> 80), Portainer (9000),
+MySQL / MariaDB (3306), PostgreSQL (5432) and SOCKS proxy (1080). In the
+tunnel settings, **Target host** and **Target port** are where the tunnel
+leads, as seen from the server: `127.0.0.1` means the server itself, or enter
+another machine the server can reach (e.g. a NAS on the server's network).
+
+- Logins work like mounting: saved password, 2FA popups and the
+  **Trust this server?** prompt.
+- **Start when the app starts** and **Restart if it drops** (on by default) are
+  set per tunnel. A dropped tunnel retries after 10 s, then up to every 60 s.
+  Wrong passwords, rejected host keys and busy ports are not retried.
+- A local port that's already in use on this PC is reported straight away.
+- Tunnels only listen on `127.0.0.1`, so other devices on your network can't
+  use them.
+- Tunnels stop when the app exits, including if it crashes.
 
 ## Troubleshooting
 
 | Log message                                    | Meaning / fix                                   |
 |------------------------------------------------|-------------------------------------------------|
-| `<path>: No such file or directory`            | Remote path doesn't exist — Edit → Test Connection → Browse… |
-| `read: Connection reset by peer`               | ssh quit before mounting — run Test Connection for the real reason (password, host key, network) |
+| `<path>: No such file or directory`            | Remote path doesn't exist - Edit → Test Connection → Browse… |
+| `read: Connection reset by peer`               | ssh quit before mounting - run Test Connection for the real reason (password, host key, network) |
 | `sshfs.exe not found`                          | Install WinFsp, then SSHFS-Win                  |
+| `[HUNG] X: not responding since ...`           | The drive's sshfs stopped answering. Click **Restart** on its card, or **Kill** to remove the drive |
 | Banner: WinFsp / SSHFS-Win not installed       | Use the Get… buttons, install, then click Re-check |
 
 ## Building the .exe
@@ -195,6 +245,7 @@ All in `%APPDATA%\kamen-sshfs-manager\`:
 |--------------------|---------------------------------------------------|
 | `connections.json` | Saved connections (passwords DPAPI-encrypted)     |
 | `settings.json`    | Theme, logging and startup preferences            |
+| `kamen.log`        | Log file (rotated at 1 MB, last 3 kept; never contains passwords) |
 | `askpass.cmd`      | Helper used by the SSH button when run from source |
 
 "Start with Windows" is stored as a `Kamen SSHFS Manager` entry under

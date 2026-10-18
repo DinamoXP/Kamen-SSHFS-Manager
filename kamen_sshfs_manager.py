@@ -101,12 +101,6 @@ FONT_LARGE = ("Segoe UI", 12, "bold")
 FONT_SMALL = ("Segoe UI", 9)
 FONT_MONO  = ("Consolas", 9)
 
-def get_available_drives():
-    """Return list of drive letters from D: onward not currently in use."""
-    import string
-    used = {f"{c}:" for c in string.ascii_uppercase if os.path.exists(f"{c}:\\")}
-    return [f"{c}:" for c in string.ascii_uppercase[3:] if f"{c}:" not in used]
-
 
 class _DATA_BLOB(ctypes.Structure):
     _fields_ = [("cbData", wt.DWORD), ("pbData", ctypes.POINTER(ctypes.c_byte))]
@@ -150,7 +144,35 @@ def _dpapi_decrypt(token: str) -> str:
 
 
 SETTINGS_PATH = CONFIG_PATH.parent / "settings.json"
-DEFAULT_SETTINGS = {"theme": "dark", "log_enabled": True, "start_minimized": True}
+DEFAULT_SETTINGS = {"theme": "dark", "log_enabled": True, "start_minimized": True,
+                    "auto_restart_hung": False}
+HUNG_RESTART_SECS = 60
+
+LOG_PATH = CONFIG_PATH.parent / "kamen.log"
+_file_logger = None
+
+def setup_file_log(enabled):
+    """Rotating log file next to the config (1 MB x 3). Follows the
+    "Enable debug log" setting."""
+    global _file_logger
+    import logging
+    import logging.handlers
+    lg = logging.getLogger("kamen")
+    if enabled and not lg.handlers:
+        h = logging.handlers.RotatingFileHandler(LOG_PATH, maxBytes=1_000_000,
+                                                 backupCount=3, encoding="utf-8")
+        h.setFormatter(logging.Formatter("%(asctime)s %(message)s", "%Y-%m-%d %H:%M:%S"))
+        lg.addHandler(h)
+        lg.setLevel(logging.INFO)
+        lg.propagate = False
+    _file_logger = lg if enabled else None
+
+def file_log(msg):
+    if _file_logger:
+        try:
+            _file_logger.info(msg.rstrip("\n"))
+        except Exception:
+            pass
 
 # "Start with Windows" lives in the registry, not settings.json, so it stays
 # correct if the user turns it off in Task Manager -> Startup.
@@ -235,8 +257,45 @@ def new_connection():
 
 _procs = {}
 
-def is_mounted(drive):
-    return os.path.exists(drive + "\\")
+def letter_present(drive):
+    """Is the drive letter there at all? GetLogicalDrives doesn't touch the
+    file system, so it can't hang on a dead mount and is safe on the UI thread."""
+    bit = ord(drive[0].upper()) - ord("A")
+    return bool(ctypes.windll.kernel32.GetLogicalDrives() >> bit & 1)
+
+_probes = {}
+_probe_lock = threading.Lock()
+
+def probe_drive(drive, timeout=3.0):
+    """Return "unmounted", "mounted" or "hung". Can block up to `timeout`, so call it
+    from worker threads only. At most one probe thread per drive: while an
+    earlier probe is stuck, callers share it instead of starting new ones."""
+    if not letter_present(drive):
+        return "unmounted"
+    with _probe_lock:
+        p = _probes.get(drive)
+        if not (p and p["thread"].is_alive()):
+            p = {"started": time.time(), "result": None}
+            def run(p=p):
+                try:
+                    p["result"] = os.path.exists(drive + "\\")
+                except OSError:
+                    p["result"] = False
+            p["thread"] = threading.Thread(target=run, daemon=True)
+            _probes[drive] = p
+            p["thread"].start()
+    p["thread"].join(max(0.0, timeout - (time.time() - p["started"])))
+    if p["thread"].is_alive():
+        return "hung"
+    return "mounted" if p["result"] else "unmounted"
+
+def _wait_letter_gone(drive, timeout):
+    end = time.time() + timeout
+    while letter_present(drive):
+        if time.time() >= end:
+            return False
+        time.sleep(0.1)
+    return True
 
 def _notify_explorer_drive_change(drive: str, added: bool):
     """Force Explorer to refresh its drive list. Combines several mechanisms
@@ -414,7 +473,7 @@ class SSHProbe:
         try:
             import paramiko
         except Exception as e:
-            raise RuntimeError(f"Can't load the 'paramiko' SSH library ({e}) — "
+            raise RuntimeError(f"Can't load the 'paramiko' SSH library ({e}) - "
                                f"run: pip install paramiko")
         self._paramiko = paramiko
         client = paramiko.SSHClient()
@@ -448,7 +507,7 @@ class SSHProbe:
             self.sftp = client.open_sftp()
         except paramiko.AuthenticationException:
             client.close()
-            raise RuntimeError("Authentication failed — check username and password/key.")
+            raise RuntimeError("Authentication failed - check username and password/key.")
         except paramiko.SSHException as e:
             client.close()
             msg = str(e)
@@ -458,7 +517,7 @@ class SSHProbe:
             raise RuntimeError(msg)
         except OSError as e:
             client.close()
-            raise RuntimeError(f"Can't reach {conn['host']}:{kw['port']} — "
+            raise RuntimeError(f"Can't reach {conn['host']}:{kw['port']} - "
                                f"{e.strerror or e}")
         self.client = client
         self.home = self.sftp.normalize(".")
@@ -631,7 +690,7 @@ def _askpass_main(prompt):
 def _conn_label(conn):
     if not conn:
         return ""
-    return f"{conn.get('name', '')} — {conn.get('user', '')}@{bare_host(conn.get('host', ''))}"
+    return f"{conn.get('name', '')} - {conn.get('user', '')}@{bare_host(conn.get('host', ''))}"
 
 def _write_stdout(text):
     data = (text + "\n").encode("utf-8")
@@ -681,11 +740,243 @@ def open_ssh_terminal(conn):
                f' || pause"')
     subprocess.Popen(cmdline, env=env, creationflags=subprocess.CREATE_NEW_CONSOLE)
 
+TUNNEL_PRESETS = [
+    # name, type, local port, remote port
+    ("Web panel", "local", 8080, 80),
+    ("Portainer", "local", 9000, 9000),
+    ("MySQL / MariaDB", "local", 3306, 3306),
+    ("PostgreSQL", "local", 5432, 5432),
+    ("SOCKS proxy", "socks", 1080, None),
+]
+DB_PORTS = {3306, 5432, 1433, 1521, 6379, 27017}
+
+def describe_tunnel(t):
+    if t["type"] == "socks":
+        return f"SOCKS proxy on 127.0.0.1:{t['local_port']}"
+    return (f"127.0.0.1:{t['local_port']} -> {t.get('remote_host') or '127.0.0.1'}"
+            f":{t['remote_port']} on the server")
+
+def port_free(port):
+    import socket
+    sock = socket.socket()
+    try:
+        sock.bind(("127.0.0.1", int(port)))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+def _tunnel_ssh_args(conn, t):
+    ssh = _find_ssh_client()
+    if not ssh:
+        raise RuntimeError("No SSH client found. Install Windows' OpenSSH Client "
+                           "(Settings -> Apps -> Optional features).")
+    args = [ssh, "-N", "-p", str(conn.get("port", 22)),
+            "-o", "ExitOnForwardFailure=yes",
+            "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
+            "-o", "LogLevel=VERBOSE"]  # login and forwarding details go to the log file
+    if not conn.get("verify_host_key", False):
+        args += ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null"]
+    if conn.get("auth_type") == "key" and conn.get("key_path"):
+        args += ["-i", conn["key_path"], "-o", "IdentitiesOnly=yes"]
+    if t["type"] == "socks":
+        args += ["-D", f"127.0.0.1:{t['local_port']}"]
+    else:
+        rh = t.get("remote_host") or "127.0.0.1"
+        if ":" in rh:
+            rh = f"[{rh}]"
+        args += ["-L", f"127.0.0.1:{t['local_port']}:{rh}:{t['remote_port']}"]
+    args.append(f"{conn['user']}@{bare_host(conn['host'])}")
+    return args
+
+def _create_kill_job():
+    """A job object that ends every process in it when this app exits or
+    crashes, so tunnels can't outlive the app unseen."""
+    class IO_COUNTERS(ctypes.Structure):
+        _fields_ = [(n, ctypes.c_ulonglong) for n in (
+            "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+            "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+    class BASIC_LIMIT(ctypes.Structure):
+        _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64),
+                    ("PerJobUserTimeLimit", ctypes.c_int64),
+                    ("LimitFlags", wt.DWORD),
+                    ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t),
+                    ("ActiveProcessLimit", wt.DWORD),
+                    ("Affinity", ctypes.c_size_t),
+                    ("PriorityClass", wt.DWORD),
+                    ("SchedulingClass", wt.DWORD)]
+    class EXTENDED_LIMIT(ctypes.Structure):
+        _fields_ = [("BasicLimitInformation", BASIC_LIMIT),
+                    ("IoInfo", IO_COUNTERS),
+                    ("ProcessMemoryLimit", ctypes.c_size_t),
+                    ("JobMemoryLimit", ctypes.c_size_t),
+                    ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                    ("PeakJobMemoryUsed", ctypes.c_size_t)]
+    k32 = ctypes.windll.kernel32
+    k32.CreateJobObjectW.restype = wt.HANDLE
+    job = k32.CreateJobObjectW(None, None)
+    if not job:
+        return None
+    info = EXTENDED_LIMIT()
+    info.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if not k32.SetInformationJobObject(wt.HANDLE(job), 9, ctypes.byref(info),
+                                       ctypes.sizeof(info)):
+        return None
+    return job
+
+class TunnelManager:
+    """Runs one background ssh.exe per tunnel and reports state changes
+    through on_change(cid, tid), called from worker threads."""
+
+    ACTIVE = ("starting", "running", "retrying")
+    FATAL = ("Permission denied", "Host key verification failed", "already in use",
+             "Could not request local forwarding", "Too many authentication failures",
+             "No SSH client")
+    NOISE = ("Authenticated to", "Local connections to", "Connection to port",
+             "channel ", "Warning: Permanently added", "Transferred:",
+             "Bytes per second", "debug")
+
+    def __init__(self, on_change):
+        self.on_change = on_change
+        self._recs = {}
+        self._lock = threading.Lock()
+        self._job = _create_kill_job()
+
+    def state(self, tid):
+        rec = self._recs.get(tid)
+        return (rec["state"], rec["msg"]) if rec else ("stopped", "")
+
+    def is_active(self, tid):
+        return self.state(tid)[0] in self.ACTIVE
+
+    def running_count(self, cid):
+        return sum(1 for r in self._recs.values()
+                   if r["cid"] == cid and r["state"] == "running")
+
+    def active_count(self):
+        return sum(1 for r in self._recs.values() if r["state"] in self.ACTIVE)
+
+    def start(self, conn, t, log):
+        with self._lock:
+            if self.is_active(t["id"]):
+                return
+            rec = {"cid": conn["id"], "tid": t["id"], "state": "starting", "msg": "",
+                   "proc": None, "stop": threading.Event()}
+            self._recs[t["id"]] = rec
+        threading.Thread(target=self._run, args=(rec, dict(conn), dict(t), log),
+                         daemon=True).start()
+
+    def stop(self, tid):
+        rec = self._recs.get(tid)
+        if not rec:
+            return
+        rec["stop"].set()
+        proc = rec["proc"]
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+
+    def stop_conn(self, cid):
+        for tid, rec in list(self._recs.items()):
+            if rec["cid"] == cid:
+                self.stop(tid)
+
+    def stop_all(self):
+        for tid in list(self._recs):
+            self.stop(tid)
+
+    def forget(self, tid):
+        self.stop(tid)
+        self._recs.pop(tid, None)
+
+    def _set(self, rec, state, msg=""):
+        rec["state"], rec["msg"] = state, msg
+        try:
+            self.on_change(rec["cid"], rec["tid"])
+        except Exception:
+            pass
+
+    def _run(self, rec, conn, t, log):
+        label = f"{t['name']} ({describe_tunnel(t)})"
+        delay = 10
+        while not rec["stop"].is_set():
+            self._set(rec, "starting")
+            if not port_free(t["local_port"]):
+                msg = f"Port {t['local_port']} is already in use on this PC."
+                log(f"[TUNNEL] {label}: {msg}\n")
+                self._set(rec, "error", msg)
+                return
+            try:
+                args = _tunnel_ssh_args(conn, t)
+            except RuntimeError as e:
+                self._set(rec, "error", str(e))
+                return
+            env = os.environ.copy()
+            env.update({"SSH_ASKPASS": _askpass_program(), "SSH_ASKPASS_REQUIRE": "force",
+                        ASKPASS_ENV: conn["id"]})
+            try:
+                proc = subprocess.Popen(args, stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                        env=env, creationflags=subprocess.CREATE_NO_WINDOW)
+            except OSError as e:
+                self._set(rec, "error", str(e))
+                return
+            rec["proc"] = proc
+            if self._job:
+                ctypes.windll.kernel32.AssignProcessToJobObject(
+                    wt.HANDLE(self._job), wt.HANDLE(int(proc._handle)))
+            log(f"[TUNNEL] Starting {label}...\n")
+
+            def watch_port(proc=proc):
+                # Running = ssh is listening on the local port. Windows' ssh
+                # doesn't reliably print a "forwarding ready" line.
+                while proc.poll() is None and not rec["stop"].is_set():
+                    if not port_free(t["local_port"]):
+                        log(f"[TUNNEL] {label} is running.\n")
+                        self._set(rec, "running")
+                        return
+                    time.sleep(0.25)
+            threading.Thread(target=watch_port, daemon=True).start()
+
+            last = ""
+            for raw in proc.stderr:
+                line = raw.decode(errors="replace").strip()
+                if not line:
+                    continue
+                file_log(f"[TUNNEL] {t['name']}: {line}")
+                if not line.startswith(self.NOISE):
+                    last = line
+            if rec["state"] == "running":
+                delay = 10  # it worked, so the next drop starts the backoff again
+            proc.wait()
+            rec["proc"] = None
+            if rec["stop"].is_set():
+                break
+            reason = last or f"ssh exited (code {proc.returncode})"
+            log(f"[TUNNEL] {label} stopped: {reason}\n")
+            fatal = any(f in reason for f in self.FATAL)
+            if fatal or not t.get("auto_restart", True) or conn.get("auth_type") == "ask":
+                self._set(rec, "error", reason)
+                return
+            self._set(rec, "retrying", f"{reason} Retrying in {delay} s.")
+            if rec["stop"].wait(delay):
+                break
+            delay = min(delay * 2, 60)
+        self._set(rec, "stopped")
+
 def connect(conn, log=None):
     cid, drive = conn["id"], conn["drive_letter"]
-    if is_mounted(drive):
+    state = probe_drive(drive)
+    if state == "mounted":
         if log: log(f"[INFO] {drive} already mounted.\n")
         return True
+    if state == "hung":
+        if log: log(f"[HUNG] {drive} is not responding. Use Restart or Kill on its card.\n")
+        return False
 
     sshfs = _find_sshfs()
     if not sshfs:
@@ -715,11 +1006,12 @@ def connect(conn, log=None):
         "-ogid=-1",
         "-oumask=000",
         "-ocreate_umask=000",
-        "-omax_readahead=1GB",
         "-oallow_other",
-        "-olarge_read",
-        "-okernel_cache",
         "-ofollow_symlinks",
+        # Notice a dead link within ~45 s and reconnect instead of hanging
+        "-oServerAliveInterval=15",
+        "-oServerAliveCountMax=3",
+        "-oreconnect",
     ]
     # Debug logging is opt-in per connection (extra_args: "-odebug -ologlevel=debug1")
     # Default-on debug was making file ops synchronous -> 38MB took forever and
@@ -776,9 +1068,10 @@ def connect(conn, log=None):
             on full OS pipe buffers and file ops grind to a halt."""
             try:
                 for line in pipe:
-                    if mounted[0]:
-                        continue  # drain only - no UI dispatch
                     txt = line.decode(errors="replace").rstrip()
+                    if mounted[0]:
+                        file_log(f"{prefix} {drive} {txt}")  # file only, no UI flood
+                        continue
                     if "service sshfs has been started" in txt:
                         result[0] = True
                     if log: log(f"{prefix} {txt}\n")
@@ -796,7 +1089,7 @@ def connect(conn, log=None):
         # server makes sshfs exit sooner, which ends the wait early.
         for i in range(240):
             time.sleep(0.5)
-            if result[0] or is_mounted(drive):
+            if result[0] or letter_present(drive):
                 if log: log(f"[OK] {drive} mounted as '{name}'.\n")
                 mounted[0] = True  # stop log streaming; threads keep draining
                 _notify_explorer_drive_change(drive, added=True)
@@ -815,46 +1108,46 @@ def connect(conn, log=None):
         if log: log(f"[ERROR] {e}\n")
         return False
 
+def _process_cmdline(pid):
+    """Command line of another process, read through the kernel
+    (NtQueryInformationProcess, ProcessCommandLineInformation). Works on
+    suspended or hung processes and never touches a drive."""
+    k32, ntdll = ctypes.windll.kernel32, ctypes.windll.ntdll
+    k32.OpenProcess.restype = wt.HANDLE
+    h = k32.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return ""
+    try:
+        size = wt.ULONG(0)
+        ntdll.NtQueryInformationProcess(wt.HANDLE(h), 60, None, 0, ctypes.byref(size))
+        if not size.value:
+            return ""
+        buf = ctypes.create_string_buffer(size.value)
+        if ntdll.NtQueryInformationProcess(wt.HANDLE(h), 60, buf, size, ctypes.byref(size)) != 0:
+            return ""
+        class UNICODE_STRING(ctypes.Structure):
+            _fields_ = [("Length", wt.USHORT), ("MaximumLength", wt.USHORT),
+                        ("Buffer", ctypes.c_void_p)]
+        us = UNICODE_STRING.from_buffer(buf)
+        return ctypes.wstring_at(us.Buffer, us.Length // 2) if us.Buffer else ""
+    finally:
+        k32.CloseHandle(wt.HANDLE(h))
+
 def _find_sshfs_pids_for_drive(drive: str):
     """Return PIDs of sshfs.exe processes whose command line targets `drive`.
-    Uses PowerShell's Get-CimInstance because wmic was removed in newer Windows."""
+    Reads command lines directly instead of asking PowerShell/WMI, which both
+    hang while any mounted drive is frozen."""
     drive_letter = drive.rstrip(":\\").upper()
-    ps = (
-        "Get-CimInstance Win32_Process -Filter \"Name='sshfs.exe'\" | "
-        "Select-Object ProcessId,CommandLine | ConvertTo-Csv -NoTypeInformation"
-    )
-    try:
-        r = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
-            capture_output=True, text=True,
-            creationflags=subprocess.CREATE_NO_WINDOW, timeout=10)
-    except Exception:
-        return []
     pids = []
-    import csv, io
-    rows = list(csv.reader(io.StringIO(r.stdout or "")))
-    if len(rows) < 2:
-        return []
-    for row in rows[1:]:  # skip header
-        if len(row) < 2:
+    for pid, (_parent, name) in _process_parents().items():
+        if name != "sshfs.exe":
             continue
-        pid, cmdline = row[0], row[1] or ""
         # Match the drive letter as a standalone token in the command line
         # e.g. "... user@host:/path Z: -p22 ..."  ->  match " Z: " or trailing " Z:"
-        cl = cmdline.upper()
-        token = f" {drive_letter}:"
-        if (token + " ") in (cl + " ") and pid.isdigit() and pid != "0":
-            pids.append(pid)
+        cl = _process_cmdline(pid).upper()
+        if f" {drive_letter}: " in cl + " ":
+            pids.append(str(pid))
     return pids
-
-def _wait_unmounted(drive, timeout=1.0):
-    """Poll until `drive` disappears (or timeout). True if it's gone."""
-    end = time.time() + timeout
-    while is_mounted(drive):
-        if time.time() >= end:
-            return False
-        time.sleep(0.1)
-    return True
 
 def disconnect(conn, log=None):
     cid, drive = conn["id"], conn["drive_letter"]
@@ -877,7 +1170,7 @@ def disconnect(conn, log=None):
     #    processes whose command line targets THIS drive specifically.
     #    (sshfs normally daemonizes after mounting, so the tracked process
     #    has usually exited already - only wait if we actually stopped it.)
-    if not _wait_unmounted(drive, 1.0 if terminated else 0):
+    if not _wait_letter_gone(drive, 1.0 if terminated else 0):
         pids = _find_sshfs_pids_for_drive(drive)
         for pid in pids:
             if log: log(f"[INFO] Killing orphaned sshfs.exe PID {pid} for {drive}...\n")
@@ -885,9 +1178,9 @@ def disconnect(conn, log=None):
                            capture_output=True,
                            creationflags=subprocess.CREATE_NO_WINDOW)
         if pids:
-            _wait_unmounted(drive, 2.0)
+            _wait_letter_gone(drive, 5.0)
 
-    mounted = is_mounted(drive)
+    mounted = letter_present(drive)
     if log: log(f"[INFO] {drive} {'still mounted' if mounted else 'unmounted successfully'}.\n")
     if not mounted:
         _notify_explorer_drive_change(drive, added=False)
@@ -1050,7 +1343,7 @@ class PromptDialog(tk.Toplevel):
             lines = [l for l in text.splitlines() if "(yes/no" not in l.lower()]
             text = "\n".join(lines).strip()
             if "fingerprint" not in text.lower():
-                text += ("\n\n(The key fingerprint wasn't passed through — this "
+                text += ("\n\n(The key fingerprint wasn't passed through - this "
                          "happens when running from source. Check it with ssh first.)")
         mk_label(self, "Trust this server?" if kind == "confirm" else "SSH login",
                  font=FONT_LARGE).pack(anchor="w", padx=20, pady=(16, 2))
@@ -1227,7 +1520,7 @@ class Card(tk.Frame):
         super().__init__(parent, bg=BG_CARD,
                          highlightbackground=BORDER, highlightthickness=1)
         self.conn, self.mgr = conn, mgr
-        self._status = "disconnected"
+        self._status = None
         self._build()
         self._refresh()
 
@@ -1255,30 +1548,58 @@ class Card(tk.Frame):
         bf = tk.Frame(self, bg=BG_CARD)
         bf.pack(side="right", padx=10)
         mk_btn(bf, "SSH", self._ssh, bg=SSH_BG).pack(side="left", padx=3)
+        self.btn_tun = mk_btn(bf, "Tunnels", lambda: self.mgr.open_tunnels(self.conn["id"]))
+        self.btn_tun.pack(side="left", padx=3)
+        self.update_tunnel_count()
         self.btn_con = mk_btn(bf, "Connect", self._toggle, bg=ACCENT, fg="white")
         # Keep text white even when disabled (e.g. during "Connecting...")
         self.btn_con.configure(disabledforeground="white")
         self.btn_con.pack(side="left", padx=3)
+        self.btn_kill = mk_btn(bf, "Kill", self._kill, bg=DANGER)  # shown only when hung
         mk_btn(bf, "Edit", self._edit).pack(side="left", padx=3)
         mk_btn(bf, "✕", self._delete).pack(side="left", padx=3)
         self.btn_open = mk_btn(bf, "📂", self._open)
         self.btn_open.pack(side="left", padx=3)
+
+    def update_tunnel_count(self):
+        n = self.mgr.tunnels.running_count(self.conn["id"])
+        self.btn_tun.configure(text=f"Tunnels ({n})" if n else "Tunnels")
 
     def _host_part(self):
         c = self.conn
         return f"{c['user']}@{c['host']}  ·  port {c.get('port', 22)}  →  "
 
     def _refresh(self):
-        self._set("connected" if is_mounted(self.conn["drive_letter"]) else "disconnected")
+        """Uses the poll worker's cached state; never touches the drive."""
+        drive = self.conn["drive_letter"]
+        state = self.mgr._drive_state.get(drive)
+        if state is None:
+            state = "checking" if letter_present(drive) else "unmounted"
+        self._set({"mounted": "connected", "unmounted": "disconnected",
+                   "hung": "hung"}.get(state, "checking"))
 
     def _set(self, status):
         if status == self._status:
             return  # no-op when unchanged - avoids flicker from poll loop
         self._status = status
-        dot_colors = {"connected": SUCCESS, "connecting": WARNING,
-                      "disconnected": FG_MUTED, "error": DANGER}
+        dot_colors = {"connected": SUCCESS, "connecting": WARNING, "stopping": WARNING,
+                      "hung": WARNING, "disconnected": FG_MUTED, "error": DANGER}
         self.cv.itemconfig(self._dot, fill=dot_colors.get(status, FG_MUTED))
-        if status == "connected":
+        drive = self.conn["drive_letter"]
+        if status == "hung":
+            self.lbl_drive.configure(text=f"{drive}  not responding", fg=WARNING)
+            self.btn_kill.pack(side="left", padx=3, after=self.btn_con)
+        else:
+            self.lbl_drive.configure(text=drive, fg=SUCCESS)
+            self.btn_kill.pack_forget()
+        if status == "hung":
+            self.btn_con.configure(text="Restart", bg=WARNING, fg="white", state="normal")
+            self.btn_open.configure(state="disabled", fg=FG_MUTED)
+        elif status in ("checking", "stopping"):
+            text = "Checking…" if status == "checking" else "Stopping…"
+            self.btn_con.configure(text=text, bg=BG_INPUT, fg=FG_MUTED, state="disabled")
+            self.btn_open.configure(state="disabled", fg=FG_MUTED)
+        elif status == "connected":
             self.btn_con.configure(text="Disconnect", bg=DANGER, fg="white", state="normal")
             self.btn_open.configure(state="normal", fg=FG)
         elif status == "connecting":
@@ -1290,7 +1611,22 @@ class Card(tk.Frame):
 
     def _toggle(self):
         if self._status == "connected": self._disconnect()
+        elif self._status == "hung": self._restart()
         else: self._connect()
+
+    def _restart(self):
+        if messagebox.askyesno("Restart mount",
+                f"Restart {self.conn['drive_letter']} ({self.conn['name']})?\n\n"
+                "Any copy to or from this drive that is still running will fail.",
+                parent=self.mgr):
+            self.mgr.kill_mount(self.conn["id"], then_connect=True)
+
+    def _kill(self):
+        if messagebox.askyesno("Kill mount",
+                f"Kill {self.conn['drive_letter']} ({self.conn['name']})?\n\n"
+                "The drive is removed. Any copy still running will fail.",
+                parent=self.mgr):
+            self.mgr.kill_mount(self.conn["id"])
 
     def _connect(self, retries=0):
         missing = missing_requirements()
@@ -1334,15 +1670,21 @@ class Card(tk.Frame):
             self.mgr.delete_connection(self.conn["id"])
     def _open(self):
         drive = self.conn["drive_letter"]
-        if not is_mounted(drive):
-            self._refresh()  # sync UI with reality
-            messagebox.showinfo("Not Mounted",
-                f"Drive {drive} is not mounted.")
+        if self._status == "hung":
+            messagebox.showwarning("Not responding",
+                f"Drive {drive} is not responding. Use Restart or Kill first.",
+                parent=self.mgr)
             return
-        try:
-            os.startfile(drive + "\\")
-        except OSError as e:
-            messagebox.showerror("Open Failed", str(e))
+        if self._status != "connected":
+            messagebox.showinfo("Not Mounted", f"Drive {drive} is not mounted.",
+                                parent=self.mgr)
+            return
+        def w():  # in a thread: if the drive hangs right now, only this thread waits
+            try:
+                os.startfile(drive + "\\")
+            except OSError as e:
+                self.mgr.after(0, lambda: messagebox.showerror("Open Failed", str(e)))
+        threading.Thread(target=w, daemon=True).start()
 
     def refresh(self, conn):
         self.conn = conn
@@ -1353,11 +1695,11 @@ class Card(tk.Frame):
 
 
 class EditDialog(tk.Toplevel):
-    def __init__(self, parent, conn, on_save):
+    def __init__(self, parent, conn, on_save, is_new=False):
         super().__init__(parent)
         self.conn, self.on_save = dict(conn), on_save
         self.withdraw()  # build hidden, then show centred over the parent
-        self.title("Edit Connection")
+        self.title("New Connection" if is_new else "Edit Connection")
         self.configure(bg=BG)
         # No fixed geometry: the dialog sizes to its content, which changes
         # with the auth method and the Test Connection result line.
@@ -1435,7 +1777,7 @@ class EditDialog(tk.Toplevel):
         all_letters = []
         for c in string.ascii_uppercase[3:]:
             letter = f"{c}:"
-            if not os.path.exists(letter + "\\"):
+            if not letter_present(letter):
                 all_letters.append(letter)
             elif is_existing and letter == self.conn.get("drive_letter"):
                 all_letters.append(letter)
@@ -1457,7 +1799,8 @@ class EditDialog(tk.Toplevel):
 
         def update_drive_status(*_):
             d = self.drive_var.get()
-            self_owns = (d == self.conn.get("drive_letter") and is_mounted(d))
+            self_owns = (d == self.conn.get("drive_letter") and
+                         getattr(self.master, "_drive_state", {}).get(d) == "mounted")
             if self_owns:
                 self.lbl_drive_status.configure(
                     text="✓ Currently mounted by this connection", fg=SUCCESS)
@@ -1616,7 +1959,7 @@ class EditDialog(tk.Toplevel):
                     path_msg = f"Remote path '{rp}' found ({resolved})."
                     path_ok = True
                 except Exception:
-                    path_msg = (f"Remote path '{rp}' does not exist on the server — "
+                    path_msg = (f"Remote path '{rp}' does not exist on the server - "
                                 f"click Browse… to pick one.")
                     path_ok = False
                 msg = f"✓ Connected as {c['user']} (home: {home}). {path_msg}"
@@ -1643,7 +1986,7 @@ class EditDialog(tk.Toplevel):
             self._probe_home = home
             self.btn_browse_remote.configure(state="normal", fg=FG)
             self.lbl_remote_note.configure(
-                text="Connected — click Browse… to pick a folder, or type a path manually.")
+                text="Connected - click Browse… to pick a folder, or type a path manually.")
 
     def _browse_remote(self):
         args = self._probe_args()
@@ -1653,7 +1996,7 @@ class EditDialog(tk.Toplevel):
         def on_pick(path):
             self.e_remote.delete(0, "end")
             self.e_remote.insert(0, path)
-            self.lbl_test.configure(text=f"✓ Remote path set to {path} — click Save to keep it.",
+            self.lbl_test.configure(text=f"✓ Remote path set to {path} - click Save to keep it.",
                                     fg=SUCCESS)
         start = c["remote_path"] if c["remote_path"] not in ("", "/") else getattr(
             self, "_probe_home", ".")
@@ -1776,7 +2119,7 @@ class RemoteBrowser(tk.Toplevel):
         threading.Thread(target=work, daemon=True).start()
 
     def _load_failed_then(self, path, err, fallback):
-        self._load(fallback, note=f"'{path}' not found on the server — "
+        self._load(fallback, note=f"'{path}' not found on the server - "
                                   f"showing your home folder.")
 
     def _load_failed(self, path, err):
@@ -1839,6 +2182,274 @@ class RemoteBrowser(tk.Toplevel):
         self.destroy()
 
 
+class TunnelDialog(tk.Toplevel):
+    """Add or edit one tunnel. Calls on_save(tunnel_dict)."""
+
+    def __init__(self, parent, tunnel, used_ports, on_save):
+        super().__init__(parent)
+        self.withdraw()
+        self.t, self.used_ports, self.on_save = dict(tunnel), used_ports, on_save
+        self.title("Edit Tunnel" if tunnel.get("name") else "New Tunnel")
+        self.configure(bg=BG)
+        self.resizable(False, False)
+        self.transient(parent)
+
+        form = tk.Frame(self, bg=BG)
+        form.pack(fill="both", expand=True, padx=8, pady=(12, 0))
+        form.columnconfigure(1, weight=1)
+        radio = dict(bg=BG, fg=FG, selectcolor=BG_INPUT, activebackground=BG,
+                     activeforeground=FG, font=FONT)
+
+        def lbl(text, r):
+            w = mk_label(form, text, fg=FG_MUTED, font=FONT_SMALL)
+            w.grid(row=r, column=0, sticky="e", padx=(10, 8), pady=5)
+            return w
+
+        lbl("Preset", 0)
+        self.preset_var = tk.StringVar(value="Custom")
+        cb = ttk.Combobox(form, textvariable=self.preset_var, state="readonly", width=22,
+                          values=[p[0] for p in TUNNEL_PRESETS] + ["Custom"])
+        cb.grid(row=0, column=1, sticky="w", padx=(0, 14), pady=5)
+        cb.bind("<<ComboboxSelected>>", lambda e: self._apply_preset())
+
+        lbl("Name", 1)
+        self.e_name = mk_entry(form, width=30)
+        self.e_name.grid(row=1, column=1, sticky="ew", padx=(0, 14), pady=5)
+        self.e_name.insert(0, self.t.get("name", ""))
+
+        lbl("Type", 2)
+        self.type_var = tk.StringVar(value=self.t.get("type", "local"))
+        tf = tk.Frame(form, bg=BG)
+        tf.grid(row=2, column=1, sticky="w", pady=5)
+        for value, text in (("local", "Web panel / database"), ("socks", "SOCKS proxy")):
+            tk.Radiobutton(tf, text=text, variable=self.type_var, value=value,
+                           command=self._type_change, **radio).pack(side="left", padx=(0, 10))
+
+        lbl("Local port", 3)
+        self.e_lport = mk_entry(form, width=8)
+        self.e_lport.grid(row=3, column=1, sticky="w", padx=(0, 14), pady=5)
+        self.e_lport.insert(0, str(self.t.get("local_port", 8080)))
+
+        self.lbl_rhost = lbl("Target host", 4)
+        self.e_rhost = mk_entry(form, width=30)
+        self.e_rhost.grid(row=4, column=1, sticky="ew", padx=(0, 14), pady=5)
+        self.e_rhost.insert(0, self.t.get("remote_host", "127.0.0.1"))
+        self.lbl_rport = lbl("Target port", 5)
+        self.e_rport = mk_entry(form, width=8)
+        self.e_rport.grid(row=5, column=1, sticky="w", padx=(0, 14), pady=5)
+        self.e_rport.insert(0, str(self.t.get("remote_port") or 80))
+
+        self.note = tk.Label(form, text="", bg=BG, fg=FG_MUTED, font=("Segoe UI", 8),
+                             justify="left", anchor="w", wraplength=360)
+        self.note.grid(row=6, column=0, columnspan=2, sticky="w", padx=(10, 14), pady=(0, 6))
+
+        self.auto_start = tk.BooleanVar(value=self.t.get("auto_start", False))
+        tk.Checkbutton(form, text="Start when the app starts", variable=self.auto_start,
+                       **radio).grid(row=7, column=1, sticky="w")
+        self.auto_restart = tk.BooleanVar(value=self.t.get("auto_restart", True))
+        tk.Checkbutton(form, text="Restart if it drops", variable=self.auto_restart,
+                       **radio).grid(row=8, column=1, sticky="w")
+
+        bar = tk.Frame(self, bg=BG)
+        bar.pack(fill="x", padx=14, pady=14)
+        mk_btn(bar, "Save", self._save, bg=ACCENT).pack(side="right", padx=(6, 0))
+        mk_btn(bar, "Cancel", self.destroy).pack(side="right")
+        self._type_change()
+        self.minsize(420, 0)
+        show_centered(self, parent)
+        self.e_name.focus_set()
+
+    def _apply_preset(self):
+        for name, kind, lport, rport in TUNNEL_PRESETS:
+            if name == self.preset_var.get():
+                self.e_name.delete(0, "end")
+                self.e_name.insert(0, name)
+                self.type_var.set(kind)
+                self.e_lport.delete(0, "end")
+                self.e_lport.insert(0, str(lport))
+                if rport:
+                    self.e_rport.delete(0, "end")
+                    self.e_rport.insert(0, str(rport))
+                    self.e_rhost.delete(0, "end")
+                    self.e_rhost.insert(0, "127.0.0.1")
+                self._type_change()
+
+    def _type_change(self):
+        socks = self.type_var.get() == "socks"
+        for w in (self.lbl_rhost, self.e_rhost, self.lbl_rport, self.e_rport):
+            w.grid_remove() if socks else w.grid()
+        self.note.configure(text=(
+            "Point your browser's proxy settings at SOCKS5 127.0.0.1 and the local "
+            "port. Its traffic then goes out through the server."
+            if socks else
+            "Where the tunnel leads, as seen from the server. 127.0.0.1 = the server "
+            "itself; or enter another machine the server can reach. Open it on this PC "
+            "at 127.0.0.1 and the local port."))
+
+    def _port(self, entry, label):
+        try:
+            v = int(entry.get().strip())
+            if 1 <= v <= 65535:
+                return v
+        except ValueError:
+            pass
+        messagebox.showerror("Tunnel", f"{label} must be a number from 1 to 65535.",
+                             parent=self)
+        return None
+
+    def _save(self):
+        name = self.e_name.get().strip()
+        if not name:
+            messagebox.showerror("Tunnel", "Give the tunnel a name.", parent=self)
+            return
+        lport = self._port(self.e_lport, "Local port")
+        if lport is None:
+            return
+        if lport in self.used_ports:
+            messagebox.showerror("Tunnel", f"Local port {lport} is already used by "
+                                 "another tunnel.", parent=self)
+            return
+        self.t.update(name=name, type=self.type_var.get(), local_port=lport,
+                      auto_start=self.auto_start.get(), auto_restart=self.auto_restart.get())
+        if self.t["type"] == "local":
+            rport = self._port(self.e_rport, "Target port")
+            if rport is None:
+                return
+            self.t.update(remote_host=self.e_rhost.get().strip() or "127.0.0.1",
+                          remote_port=rport)
+        self.t.setdefault("id", str(int(time.time() * 1000)))
+        self.destroy()
+        self.on_save(self.t)
+
+
+class TunnelsWindow(tk.Toplevel):
+    """Lists one connection's tunnels with Start/Stop, Open, Edit and Delete."""
+
+    def __init__(self, app, cid):
+        super().__init__(app)
+        self.withdraw()
+        self.app, self.cid = app, cid
+        conn = app.find_conn(cid)
+        self.title(f"Tunnels - {conn['name']}")
+        self.configure(bg=BG)
+        self.transient(app)
+        self.protocol("WM_DELETE_WINDOW", self._close)
+
+        mk_label(self, "Tunnels", font=FONT_LARGE).pack(anchor="w", padx=16, pady=(14, 0))
+        mk_label(self, _conn_label(conn), fg=FG_MUTED, font=FONT_SMALL).pack(anchor="w", padx=16)
+        self.rows = tk.Frame(self, bg=BG)
+        self.rows.pack(fill="both", expand=True, padx=16, pady=10)
+        self.rows.columnconfigure(1, weight=1)
+
+        bar = tk.Frame(self, bg=BG)
+        bar.pack(fill="x", padx=16, pady=(0, 14))
+        mk_btn(bar, "+ Add Tunnel", self._add, bg=SUCCESS).pack(side="left")
+        mk_btn(bar, "Close", self._close).pack(side="right")
+        self.minsize(640, 240)
+        self.refresh()
+        show_centered(self, app)
+        self.grab_release()  # not modal: the main window stays usable
+
+    def _close(self):
+        self.app._tunnel_windows.pop(self.cid, None)
+        self.destroy()
+
+    def refresh(self):
+        for w in self.rows.winfo_children():
+            w.destroy()
+        conn = self.app.find_conn(self.cid)
+        tunnels = conn.get("tunnels", []) if conn else []
+        if not tunnels:
+            mk_label(self.rows, "No tunnels yet. Click + Add Tunnel to reach a web panel, "
+                     "database or browse through this server.", fg=FG_MUTED,
+                     wraplength=560, justify="left").grid(row=0, column=0, columnspan=4,
+                                                          sticky="w", pady=20)
+            return
+        colors = {"running": SUCCESS, "starting": WARNING, "retrying": WARNING,
+                  "error": DANGER, "stopped": FG_MUTED}
+        for r, t in enumerate(tunnels):
+            state, msg = self.app.tunnels.state(t["id"])
+            dot = tk.Canvas(self.rows, width=12, height=12, bg=BG, highlightthickness=0)
+            dot.create_oval(1, 1, 11, 11, fill=colors.get(state, FG_MUTED), outline="")
+            dot.grid(row=r, column=0, sticky="n", padx=(0, 8), pady=(8, 0))
+            info = tk.Frame(self.rows, bg=BG)
+            info.grid(row=r, column=1, sticky="ew", pady=4)
+            mk_label(info, t["name"], font=FONT_BOLD).pack(anchor="w")
+            mk_label(info, describe_tunnel(t), fg=FG_MUTED, font=FONT_SMALL).pack(anchor="w")
+            text = {"running": "Running", "starting": "Starting…", "stopped": "Stopped"}.get(
+                state, msg)
+            mk_label(info, text, fg=colors.get(state, FG_MUTED), font=FONT_SMALL,
+                     wraplength=330, justify="left").pack(anchor="w")
+            bf = tk.Frame(self.rows, bg=BG)
+            bf.grid(row=r, column=2, sticky="e", pady=4)
+            active = state in TunnelManager.ACTIVE
+            if t["type"] == "local":
+                db = t.get("remote_port") in DB_PORTS
+                running = state == "running"
+                b = mk_btn(bf, "Copy" if db else "Open", lambda t=t, db=db: self._open(t, db),
+                           bg=SUCCESS if running else BG_INPUT)
+                b.pack(side="left", padx=2)
+                if not running:
+                    b.configure(state="disabled", fg=FG_MUTED)
+            mk_btn(bf, "Stop" if active else "Start",
+                   lambda t=t: self._toggle(t),
+                   bg=DANGER if active else ACCENT).pack(side="left", padx=2)
+            mk_btn(bf, "Edit", lambda t=t: self._edit(t)).pack(side="left", padx=2)
+            mk_btn(bf, "✕", lambda t=t: self._delete(t)).pack(side="left", padx=2)
+
+    def _used_ports(self, exclude_id=None):
+        return {t["local_port"] for c in self.app._connections
+                for t in c.get("tunnels", []) if t.get("id") != exclude_id}
+
+    def _toggle(self, t):
+        if self.app.tunnels.is_active(t["id"]):
+            self.app.tunnels.stop(t["id"])
+        else:
+            self.app.tunnels.start(self.app.find_conn(self.cid), t, self.app.log)
+        self.refresh()
+
+    def _open(self, t, db):
+        addr = f"127.0.0.1:{t['local_port']}"
+        if db:
+            self.clipboard_clear()
+            self.clipboard_append(addr)
+            self.app.log(f"[TUNNEL] Copied {addr} for your database client.\n")
+        else:
+            import webbrowser
+            webbrowser.open(f"http://{addr}")
+
+    def _add(self):
+        TunnelDialog(self, {}, self._used_ports(), self._saved)
+
+    def _edit(self, t):
+        TunnelDialog(self, t, self._used_ports(t["id"]), self._saved)
+
+    def _saved(self, t):
+        conn = self.app.find_conn(self.cid)
+        tunnels = conn.setdefault("tunnels", [])
+        for i, old in enumerate(tunnels):
+            if old["id"] == t["id"]:
+                if self.app.tunnels.is_active(t["id"]):  # apply the new settings
+                    self.app.tunnels.stop(t["id"])
+                    self.app.after(1500, lambda: self.app.tunnels.start(conn, t, self.app.log))
+                tunnels[i] = t
+                break
+        else:
+            tunnels.append(t)
+        save_connections(self.app._connections)
+        self.refresh()
+
+    def _delete(self, t):
+        if not messagebox.askyesno("Delete tunnel", f"Delete '{t['name']}'?", parent=self):
+            return
+        self.app.tunnels.forget(t["id"])
+        conn = self.app.find_conn(self.cid)
+        conn["tunnels"] = [x for x in conn.get("tunnels", []) if x["id"] != t["id"]]
+        save_connections(self.app._connections)
+        self.refresh()
+        self.app.on_tunnel_change(self.cid, t["id"])
+
+
 class SettingsDialog(tk.Toplevel):
     def __init__(self, parent, settings, on_save):
         super().__init__(parent)
@@ -1883,11 +2494,19 @@ class SettingsDialog(tk.Toplevel):
              "automatically are retried for about a minute while the network "
              "comes up.")
 
+        section("Drives")
+        self.restart_var = tk.BooleanVar(value=settings.get("auto_restart_hung", False))
+        tk.Checkbutton(body, text="Restart a drive that stops responding",
+                       variable=self.restart_var, **radio).pack(anchor="w", padx=(18, 0))
+        note(f"After {HUNG_RESTART_SECS} seconds of not responding. Off by default: "
+             "restarting interrupts any copy still running on that drive.")
+
         section("Logging")
         self.log_var = tk.BooleanVar(value=settings["log_enabled"])
         tk.Checkbutton(body, text="Enable debug log", variable=self.log_var,
                        **radio).pack(anchor="w", padx=(18, 0))
-        note("When off, the Debug Log panel is hidden and nothing is recorded.")
+        note("Also saved to kamen.log in the app's settings folder. When off, the "
+             "Debug Log panel is hidden and nothing is recorded.")
 
         bar = tk.Frame(self, bg=BG)
         bar.pack(fill="x", padx=14, pady=(14, 14))
@@ -1900,7 +2519,8 @@ class SettingsDialog(tk.Toplevel):
         self.settings.update(theme=self.theme_var.get(),
                              log_enabled=self.log_var.get(),
                              start_with_windows=self.sww_var.get(),
-                             start_minimized=self.min_var.get())
+                             start_minimized=self.min_var.get(),
+                             auto_restart_hung=self.restart_var.get())
         self.destroy()
         self.on_save(self.settings)
 
@@ -1963,7 +2583,7 @@ class ShutdownDialog(tk.Toplevel):
                                   fg=SUCCESS if ok else DANGER)
         self._pending -= 1
         if self._pending == 0:
-            self.lbl_title.configure(text="Done — closing")
+            self.lbl_title.configure(text="Done - closing")
             self.after(400, self._finish)
 
     def _animate(self):
@@ -2010,6 +2630,11 @@ class App(tk.Tk):
         self._set_window_icon()
         self._connections = load_connections()
         self._cards = {}
+        self._drive_state = {}  # drive -> "mounted" / "unmounted" / "hung", set by the poll worker
+        self.tunnels = TunnelManager(self.on_tunnel_change)
+        self._tunnel_windows = {}
+        setup_file_log(self._settings["log_enabled"])
+        file_log(f"[INFO] {APP_NAME} {APP_VERSION} started")
         self._log_visible = False
         self._tray_icon = None
         self._stop = threading.Event()
@@ -2022,6 +2647,8 @@ class App(tk.Tk):
         else:
             self._auto_connect()
         self._poll()
+        self._auto_start_tunnels()
+        self._listen_for_show()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         if self._at_login and self._settings.get("start_minimized", True):
             self.after(100, self._minimize_to_tray)
@@ -2165,7 +2792,7 @@ class App(tk.Tk):
         names = " and ".join(n for n, _ in missing)
         msg = (f"⚠  {names} {'is' if len(missing) == 1 else 'are'} not installed. "
                f"This app needs {'it' if len(missing) == 1 else 'them'} to mount drives"
-               f"{' — install in this order' if len(missing) > 1 else ''}, "
+               f"{' - install in this order' if len(missing) > 1 else ''}, "
                f"then click Re-check.")
         tk.Label(self._req_banner, text=msg, bg=BANNER_BG, fg=BANNER_FG,
                  font=FONT_SMALL, justify="left", anchor="w",
@@ -2180,17 +2807,17 @@ class App(tk.Tk):
         self._req_banner.pack(fill="x", side="top", after=self._hdr)
 
         for name, url in (missing if log_missing else []):
-            self.log(f"[WARN] {name} not installed — download: {url}\n")
+            self.log(f"[WARN] {name} not installed - download: {url}\n")
         return missing
 
     def _recheck_requirements(self):
         if not self.check_requirements():
-            self.log("[OK] WinFsp and SSHFS-Win found — ready to connect.\n")
+            self.log("[OK] WinFsp and SSHFS-Win found - ready to connect.\n")
             messagebox.showinfo("Requirements", "WinFsp and SSHFS-Win are installed.\n"
                                 "You're ready to connect.", parent=self)
 
     def show_requirements_dialog(self, missing):
-        lines = "\n".join(f"  {i}. {name}  —  {url}"
+        lines = "\n".join(f"  {i}. {name}  -  {url}"
                           for i, (name, url) in enumerate(missing, 1))
         if messagebox.askyesno(
                 "Missing Requirements",
@@ -2230,20 +2857,55 @@ class App(tk.Tk):
                         self._connections[i] = updated; break
             save_connections(self._connections)
             self._render()
-        EditDialog(self, conn, on_save)
+        EditDialog(self, conn, on_save, is_new=is_new)
+
+    def find_conn(self, cid):
+        return next((c for c in self._connections if c["id"] == cid), None)
+
+    def open_tunnels(self, cid):
+        w = self._tunnel_windows.get(cid)
+        if w and w.winfo_exists():
+            w.deiconify()
+            w.lift()
+            return
+        self._tunnel_windows[cid] = TunnelsWindow(self, cid)
+
+    def on_tunnel_change(self, cid, tid):
+        """Called from tunnel worker threads."""
+        def w():
+            card = self._cards.get(cid)
+            if card and card.winfo_exists():
+                card.update_tunnel_count()
+            win = self._tunnel_windows.get(cid)
+            if win and win.winfo_exists():
+                win.refresh()
+        try:
+            self.after(0, w)
+        except RuntimeError:
+            pass
+
+    def _auto_start_tunnels(self):
+        for conn in self._connections:
+            for t in conn.get("tunnels", []):
+                if t.get("auto_start"):
+                    self.tunnels.start(conn, t, self.log)
 
     def delete_connection(self, cid):
+        self.tunnels.stop_conn(cid)
+        w = self._tunnel_windows.pop(cid, None)
+        if w and w.winfo_exists():
+            w.destroy()
         self._connections = [c for c in self._connections if c["id"] != cid]
         save_connections(self._connections)
         self._render()
 
     def _disconnect_all(self):
         # Run mount checks + disconnects in a worker thread to keep the UI
-        # responsive (is_mounted can block on busy SSHFS drives).
+        # responsive.
         def w():
             for conn in self._connections:
                 try:
-                    if is_mounted(conn["drive_letter"]):
+                    if letter_present(conn["drive_letter"]):
                         threading.Thread(target=disconnect, args=(conn, self.log),
                                          daemon=True).start()
                 except Exception:
@@ -2251,40 +2913,146 @@ class App(tk.Tk):
         threading.Thread(target=w, daemon=True).start()
 
     def _auto_connect(self):
-        for conn in self._connections:
-            if conn.get("auto_connect") and not is_mounted(conn["drive_letter"]):
-                card = self._cards.get(conn["id"])
-                # At Windows login the network may not be up yet: retry.
-                if card: card._connect(retries=5 if self._at_login else 0)
+        conns = [c for c in self._connections if c.get("auto_connect")]
+        if not conns:
+            return
+        def w():  # probing can wait on a slow drive, so not on the UI thread
+            for conn in conns:
+                state = probe_drive(conn["drive_letter"])
+                if state == "unmounted":
+                    for _ in range(20):  # the main loop may not be running yet
+                        try:
+                            self.after(0, self._auto_connect_one, conn["id"])
+                            break
+                        except RuntimeError:
+                            time.sleep(0.25)
+                elif state == "hung":
+                    self.log(f"[HUNG] {conn['drive_letter']} is not responding; "
+                             f"not auto-connecting {conn['name']}.\n")
+        threading.Thread(target=w, daemon=True).start()
+
+    def _auto_connect_one(self, cid):
+        card = self._cards.get(cid)
+        if card and card._status in ("checking", "disconnected", "error"):
+            # At Windows login the network may not be up yet: retry.
+            card._connect(retries=5 if self._at_login else 0)
 
     def retry_connect(self, cid, retries):
         card = self._cards.get(cid)
-        if card and card.winfo_exists() and card._status != "connected" \
-                and not is_mounted(card.conn["drive_letter"]):
+        if card and card.winfo_exists() and card._status not in ("connected", "hung") \
+                and not letter_present(card.conn["drive_letter"]):
             card._connect(retries=retries)
+
+    def kill_mount(self, cid, then_connect=False):
+        """Kill a mount by its sshfs process (works on a hung drive), then
+        optionally mount it again."""
+        card = self._cards.get(cid)
+        if not card:
+            return
+        conn = card.conn
+        card._set("stopping")
+        self.log(f"[INFO] {'Restarting' if then_connect else 'Killing'} {conn['drive_letter']} "
+                 f"({conn['name']})...\n")
+        def w():
+            gone = disconnect(conn, log=self.log)
+            if not gone:
+                self.log(f"[ERROR] {conn['drive_letter']} is still present after the kill.\n")
+                self.set_card_status(cid, "hung")
+                return
+            self._drive_state[conn["drive_letter"]] = "unmounted"
+            if not then_connect:
+                self.set_card_status(cid, "disconnected")
+                return
+            self.set_card_status(cid, "connecting")
+            ok = connect(conn, log=self.log)
+            self.set_card_status(cid, "connected" if ok else "error")
+            if not ok:
+                self.set_card_status(cid, "disconnected", delay=2500)
+        threading.Thread(target=w, daemon=True).start()
 
     def _poll(self):
         def loop():
-            while not self._stop.wait(5):
-                # Do the (potentially slow) is_mounted checks here, off the UI thread.
-                # SSHFS drives under heavy I/O can block os.path.exists for seconds.
+            hits = {}        # drive -> consecutive "hung" probes
+            since = {}       # drive -> time it was first reported hung
+            restarted = set()
+            first = True
+            while first or not self._stop.wait(5):
+                first = False
                 snapshot = []
                 for cid, card in list(self._cards.items()):
+                    conn = card.conn
+                    drive = conn["drive_letter"]
                     try:
-                        snapshot.append((cid, is_mounted(card.conn["drive_letter"])))
+                        state = probe_drive(drive)
                     except Exception:
-                        pass
+                        continue
+                    if state == "hung":
+                        hits[drive] = hits.get(drive, 0) + 1
+                        if hits[drive] < 2:
+                            continue  # one slow answer under heavy copying isn't a hang
+                        if drive not in since:
+                            since[drive] = time.time()
+                            self._report_hung(conn)
+                        elif (self._settings.get("auto_restart_hung") and drive not in restarted
+                              and time.time() - since[drive] >= HUNG_RESTART_SECS):
+                            restarted.add(drive)
+                            self.log(f"[HUNG] Auto-restarting {drive} ({conn['name']}).\n")
+                            self._notify(f"Restarting {conn['name']} ({drive}), "
+                                         f"it stopped responding.")
+                            self.after(0, self.kill_mount, cid, True)
+                    else:
+                        if drive in since:
+                            self.log(f"[INFO] {drive} is responding again.\n")
+                        hits.pop(drive, None)
+                        since.pop(drive, None)
+                        restarted.discard(drive)
+                    self._drive_state[drive] = state
+                    snapshot.append((cid, state))
                 try:
                     self.after(0, self._apply_poll_snapshot, snapshot)
                 except RuntimeError:
-                    return  # Tk root destroyed
+                    if self._stop.is_set():
+                        return  # app closed
+                    # main loop not started yet: try again on the next round
         threading.Thread(target=loop, daemon=True).start()
 
+    def _report_hung(self, conn):
+        """Runs on the poll worker, once per hang."""
+        drive = conn["drive_letter"]
+        pids = _find_sshfs_pids_for_drive(drive)
+        self.log(f"[HUNG] {drive} not responding since {time.strftime('%H:%M:%S')} "
+                 f"(sshfs PID {', '.join(pids) or 'unknown'})\n")
+        self._notify(f"{conn['name']} ({drive}) is not responding. "
+                     f"Open {APP_NAME} to restart it.")
+
+    def _notify(self, msg):
+        icon = self._tray_icon
+        if icon:
+            try:
+                icon.notify(msg, APP_NAME)
+            except Exception:
+                pass
+
     def _apply_poll_snapshot(self, snapshot):
-        for cid, mounted in snapshot:
+        status = {"mounted": "connected", "unmounted": "disconnected", "hung": "hung"}
+        for cid, state in snapshot:
             card = self._cards.get(cid)
-            if card:
-                card._set("connected" if mounted else "disconnected")
+            if card and card._status not in ("connecting", "stopping"):
+                card._set(status[state])
+
+    def _listen_for_show(self):
+        """A second launch signals this event; bring this window to the front."""
+        if not _show_event:
+            return
+        def w():
+            while True:
+                if _k32.WaitForSingleObject(_show_event, 0xFFFFFFFF) != 0:
+                    return
+                try:
+                    self.after(0, self._restore)
+                except RuntimeError:
+                    return
+        threading.Thread(target=w, daemon=True).start()
 
     def _clear_log(self):
         self.log_text.configure(state="normal")
@@ -2304,6 +3072,7 @@ class App(tk.Tk):
     def log(self, msg):
         if not self._settings["log_enabled"]:
             return
+        file_log(msg)
         def w():
             self.log_text.configure(state="normal")
             self.log_text.insert("end", msg)
@@ -2312,7 +3081,10 @@ class App(tk.Tk):
             if line_count > self.LOG_MAX_LINES:
                 self.log_text.delete("1.0", f"{line_count - self.LOG_MAX_LINES + 1}.0")
             self.log_text.configure(state="disabled")
-        self.after(0, w)
+        try:
+            self.after(0, w)
+        except RuntimeError:
+            pass  # window not running yet or already closed; the file log has it
 
     def set_card_status(self, cid, status, delay=0):
         """Thread-safe card status update, looked up by connection id."""
@@ -2338,6 +3110,7 @@ class App(tk.Tk):
                                      parent=self)
         old, self._settings = self._settings, new
         save_settings(new)
+        setup_file_log(new["log_enabled"])
         if new["theme"] != old["theme"]:
             apply_theme(new["theme"])
             self._rebuild_ui()
@@ -2386,7 +3159,7 @@ class App(tk.Tk):
             import pystray
         except Exception as e:
             messagebox.showinfo("Tray Unavailable",
-                f"pystray/Pillow not installed — cannot minimize to tray.\n({e})")
+                f"pystray/Pillow not installed - cannot minimize to tray.\n({e})")
             self.deiconify(); return
         img = _make_logo(64)
         if img is None:
@@ -2408,6 +3181,8 @@ class App(tk.Tk):
             self._tray_icon = None
         self.deiconify()
         self.lift()
+        self.attributes("-topmost", True)  # win the foreground lock, then let go
+        self.after(200, lambda: self.attributes("-topmost", False))
         self.focus_force()
 
     def _quit(self):
@@ -2417,14 +3192,25 @@ class App(tk.Tk):
         self._on_close()
 
     def _on_close(self):
-        mounted = [c for c in self._connections if is_mounted(c["drive_letter"])]
-        if mounted:
+        mounted = [c for c in self._connections if letter_present(c["drive_letter"])]
+        tunnels = self.tunnels.active_count()
+        if mounted or tunnels:
+            what = []
+            if mounted:
+                what.append(f"{len(mounted)} connection(s) still mounted")
+            if tunnels:
+                what.append(f"{tunnels} tunnel(s) running")
             ans = messagebox.askyesnocancel(
                 "Active Connections",
-                f"{len(mounted)} connection(s) still mounted.\n\nYes = Disconnect & Exit\nNo = Minimize to tray\nCancel = Go back")
+                f"{' and '.join(what).capitalize()}.\n\nYes = Disconnect & Exit\n"
+                f"No = Minimize to tray\nCancel = Go back")
             if ans is None:
                 return
             if ans:
+                self.tunnels.stop_all()
+                if not mounted:
+                    self._finish_close()
+                    return
                 # Disconnect in the background so the UI stays responsive;
                 # the dialog calls _finish_close once every drive is done.
                 self._stop.set()
@@ -2437,14 +3223,52 @@ class App(tk.Tk):
 
     def _finish_close(self):
         self._stop.set()
+        self.tunnels.stop_all()
         if hasattr(self, "_tray_icon") and self._tray_icon:
             self._tray_icon.stop()
             self._tray_icon = None
         self.destroy()
 
+_k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+_k32.CreateMutexW.restype = wt.HANDLE
+_k32.CreateMutexW.argtypes = [ctypes.c_void_p, wt.BOOL, wt.LPCWSTR]
+_k32.CreateEventW.restype = wt.HANDLE
+_k32.CreateEventW.argtypes = [ctypes.c_void_p, wt.BOOL, wt.BOOL, wt.LPCWSTR]
+_k32.OpenEventW.restype = wt.HANDLE
+_k32.OpenEventW.argtypes = [wt.DWORD, wt.BOOL, wt.LPCWSTR]
+_k32.SetEvent.argtypes = [wt.HANDLE]
+_k32.CloseHandle.argtypes = [wt.HANDLE]
+_k32.WaitForSingleObject.restype = wt.DWORD
+_k32.WaitForSingleObject.argtypes = [wt.HANDLE, wt.DWORD]
+
+_instance_mutex = None
+_show_event = None
+
+def claim_single_instance():
+    """True if no other copy is running. Otherwise asks the running copy to
+    show its window (unless this launch came from Windows startup)."""
+    global _instance_mutex, _show_event
+    _instance_mutex = _k32.CreateMutexW(None, False, "Local\\KamenSSHFSManager")
+    if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+        if STARTUP_ARG not in sys.argv[1:]:
+            ev = _k32.OpenEventW(0x0002, False, "Local\\KamenSSHFSManagerShow")
+            if ev:
+                _k32.SetEvent(ev)
+                _k32.CloseHandle(ev)
+        return False
+    _show_event = _k32.CreateEventW(None, False, False, "Local\\KamenSSHFSManagerShow")
+    return True
+
 if __name__ == "__main__":
     # Launched by ssh as SSH_ASKPASS (see open_ssh_terminal): answer and exit
-    # before any UI is created.
+    # before any UI is created. Must stay before the single-instance check,
+    # since the helper is this same exe running while the app is open.
     if os.environ.get(ASKPASS_ENV) and len(sys.argv) == 2:
         sys.exit(_askpass_main(sys.argv[1]))
+    if not claim_single_instance():
+        sys.exit(0)
     App().mainloop()
+    # A probe thread stuck on a dead drive must not keep the process alive
+    import logging
+    logging.shutdown()
+    os._exit(0)
