@@ -211,7 +211,7 @@ another machine the server can reach (e.g. a NAS on the server's network).
 
 Official releases are built by GitHub Actions
 ([`.github/workflows/release.yml`](.github/workflows/release.yml)) on GitHub's
-Windows servers, signed through SignPath, and attached to a GitHub Release.
+Windows servers and attached to a GitHub Release.
 Pushing a tag that matches `version.json` (e.g. `v1.5.0`) starts a release
 build. Each release includes `SHA256SUMS.txt` for verifying the download.
 
@@ -265,19 +265,18 @@ Host keys you chose to trust are kept in `%USERPROFILE%\.ssh\known_hosts`,
 which is shared with other SSH tools; remove those lines only if you no longer
 need them.
 
-## Code Signing Policy
+## Code Signing
 
-Free code signing provided by [SignPath.io](https://about.signpath.io),
-certificate by [SignPath Foundation](https://signpath.org).
+Releases are not code-signed yet, so Windows SmartScreen may warn that the app
+is unrecognized. Click **More info**, then **Run anyway**.
 
-| Role                     | Members        |
-|--------------------------|----------------|
-| Committers and reviewers | Irnes Karaduz  |
-| Approvers                | Irnes Karaduz  |
+To check that a download is genuine:
 
-Release builds are produced only by the GitHub Actions workflow in this
-repository from the tagged source code, and every signing request is approved
-manually.
+- Release builds are produced only by the GitHub Actions workflow in this
+  repository, from the tagged public source code.
+- Each release includes `SHA256SUMS.txt`. Compare it with the hash of your
+  download, e.g. in PowerShell:
+  `Get-FileHash "Kamen.SSHFS.Manager.exe" -Algorithm SHA256`
 
 ## Privacy
 
