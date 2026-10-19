@@ -7,13 +7,13 @@ letters, open SSH tunnels to web panels and databases, browse through a SOCKS
 proxy, and open a terminal in one click. Built on SSHFS-Win, with saved
 connections, 2FA support and automatic reconnect.
 
-![Kamen SSHFS Manager main window with two mounted connections](images/main.jpg)
+![Kamen SSHFS Manager main window with three connections, two of them mounted](images/main.jpg?v=b18e8287)
 
 ## Screenshots
 
 | New connection | Settings |
 |:---:|:---:|
-| ![Connection details form with Test Connection and Browse](images/new_connection.jpg) | ![Settings window with theme, startup, drive and logging options](images/settings.jpg) |
+| ![Connection details form with Test Connection and Browse](images/new_connection.jpg?v=4625190b) | ![Settings window with theme, startup, connections, drive, update and logging options](images/settings.jpg?v=b0347228) |
 
 ## Features
 
@@ -211,7 +211,7 @@ how many are running, e.g. **Tunnels (2)**.
 
 | Tunnels | + Add Tunnel |
 |:---:|:---:|
-| ![Tunnels window with a web panel, a database and a SOCKS proxy](images/tunnels.jpg) | ![New Tunnel dialog with the Portainer preset](images/new_tunnel.jpg) |
+| ![Tunnels window with a web panel, a database and a SOCKS proxy](images/tunnels.jpg?v=4fc19683) | ![New Tunnel dialog with the Portainer preset](images/new_tunnel.jpg?v=1bfe399e) |
 
 | Type | Use it for | How to use it |
 |---|---|---|
