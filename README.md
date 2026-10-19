@@ -21,6 +21,9 @@ connections, 2FA support and automatic reconnect.
 - Connect and disconnect per connection, or **Disconnect All**
 - Hosts by name, IPv4 or IPv6 address (see [Host Addresses](#host-addresses))
 - Three auth methods: Password, Private Key, Ask Each Time
+- **Key login...** sets up a login key on the server for you, so no password
+  is needed after that (see [Key Login](#key-login))
+- Read-only mounts: the server's files can be opened and copied, not changed
 - Interactive login (2FA codes) and a **Trust this server?** prompt for new host keys
 - Passwords encrypted with Windows DPAPI (readable only by your Windows account)
 - **Test Connection** and a remote folder browser for picking the remote path
@@ -37,6 +40,13 @@ connections, 2FA support and automatic reconnect.
 - Checks for WinFsp and SSHFS-Win on startup and links to the downloads
 - Exit disconnects all drives in the background with a progress window
 - Open a mounted drive in Explorer by clicking its drive tile (e.g. `I:\`)
+- Free space shown on each connected drive's card
+- Tray menu: connect, disconnect, open drives and start tunnels without
+  opening the window; the tray icon gets an orange dot if a drive hangs
+- Right-click a card for more actions, including **Duplicate**
+- Export and import connections (passwords are never exported)
+- Optional check for new releases on GitHub (off by default)
+- **Log File** button opens the folder with the log file
 - Live status polling (every 5 s) that can't freeze the app, with
   **Restart** / **Kill** for a drive that stops responding
 - Automatic reconnect when the network drops; one copy of the app at a time
@@ -84,6 +94,12 @@ Open with the **⚙ Settings** button. Defaults are shown in bold.
 | Start minimized to tray | **On** / Off (applies when Windows starts the app)  |
 | Restart a drive that stops responding | On / **Off** (after 60 s; interrupts any copy still running on that drive) |
 | Enable debug log        | **On** / Off (also written to `kamen.log`)          |
+| Check for updates when the app starts | On / **Off** (shows a banner with a Download button when a newer release is out) |
+| Connections             | **Export...** / **Import...** a `.json` file of your connections (no passwords) |
+
+Imported connections get new ids, and if a drive letter is already used the
+import picks a free one. Connections that used a saved password need it
+typed in again (the import lists them).
 
 ## Host Addresses
 
@@ -108,6 +124,27 @@ number of your network adapter (shown by `ipconfig`, e.g. `%12`).
 | Password      | Saved encrypted (DPAPI). Used for mounting and the SSH button. |
 | Private Key   | Path to your `.pem` or OpenSSH key file; a passphrase is asked in a popup |
 | Ask Each Time | A popup asks for the password on each connect; never saved   |
+
+### Key Login
+
+In the connection's Edit window, click **Key login...** to stop using a
+password. The app:
+
+1. Creates a new ed25519 key in `%APPDATA%\kamen-sshfs-manager\keys\`
+   (using Windows' own `ssh-keygen`).
+2. Logs in once with your password and adds the public key to
+   `~/.ssh/authorized_keys` on the server.
+3. Checks that a login with only the key works, then switches the connection
+   to **Private Key** and offers to forget the saved password.
+
+### Read-only Mounts
+
+Tick **Read-only (files on the server can't be changed)** in the Edit window.
+Files can be opened and copied off the drive, but not changed, created or
+deleted. The server's SFTP program is started in read-only mode, so this
+needs OpenSSH's `sftp-server` in one of the usual places
+(`/usr/lib/openssh/`, `/usr/libexec/openssh/`, `/usr/lib/ssh/`, `/usr/libexec/`,
+`/usr/lib/`). If it isn't found, connecting fails with a hint in the log.
 
 ### Interactive login (2FA)
 
@@ -225,6 +262,10 @@ pyinstaller --onefile --windowed --name "Kamen SSHFS Manager" --icon icon.ico --
 
 The exe is written to `dist\Kamen SSHFS Manager.exe`.
 
+`kamen_sshfs_manager.py` only starts the app; the code is in the `kamen/`
+package (`config`, `winutil`, `ssh`, `mounts`, `ui`), which PyInstaller picks up
+on its own.
+
 - `tools/make_version_info.py` writes `version_info.txt` from `version.json`,
   so the exe's Windows properties show the product name and version.
 - `--add-data "version.json;."` bundles the version file, so the app shows the
@@ -247,6 +288,7 @@ All in `%APPDATA%\kamen-sshfs-manager\`:
 | `settings.json`    | Theme, logging and startup preferences            |
 | `kamen.log`        | Log file (rotated at 1 MB, last 3 kept; never contains passwords) |
 | `askpass.cmd`      | Helper used by the SSH button when run from source |
+| `keys\`            | Login keys created by **Key login...**            |
 
 "Start with Windows" is stored as a `Kamen SSHFS Manager` entry under
 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
@@ -286,6 +328,8 @@ operating it.
 
 The app connects only to the SSH servers you configure, and opens download
 pages in your browser only when you click a download button.
+If you turn on **Check for updates when the app starts** (off by default),
+it also asks GitHub for the newest release version on each start.
 
 ## Support
 
