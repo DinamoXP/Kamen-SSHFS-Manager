@@ -128,7 +128,7 @@ def _dpapi_decrypt(token: str) -> str:
 SETTINGS_PATH = CONFIG_PATH.parent / "settings.json"
 
 DEFAULT_SETTINGS = {"theme": "dark", "log_enabled": True, "start_minimized": True,
-                    "auto_restart_hung": False, "check_updates": False}
+                    "auto_restart_hung": True, "check_updates": True}
 
 RELEASES_URL = "https://github.com/DinamoXP/Kamen-SSHFS-Manager/releases/latest"
 

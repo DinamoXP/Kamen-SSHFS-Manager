@@ -1537,14 +1537,14 @@ class SettingsDialog(tk.Toplevel):
         self.restart_var = tk.BooleanVar(value=settings.get("auto_restart_hung", False))
         tk.Checkbutton(body, text="Restart a drive that stops responding",
                        variable=self.restart_var, **radio).pack(anchor="w", padx=(18, 0))
-        note(f"After {HUNG_RESTART_SECS} seconds of not responding. Off by default: "
+        note(f"After {HUNG_RESTART_SECS} seconds of not responding. On by default: "
              "restarting interrupts any copy still running on that drive.")
 
         section("Updates")
         self.update_var = tk.BooleanVar(value=settings.get("check_updates", False))
         tk.Checkbutton(body, text="Check for updates when the app starts",
                        variable=self.update_var, **radio).pack(anchor="w", padx=(18, 0))
-        note("Asks GitHub once per start whether a newer version exists. Off by default.")
+        note("Asks GitHub once per start whether a newer version exists. On by default.")
 
         section("Logging")
         self.log_var = tk.BooleanVar(value=settings["log_enabled"])

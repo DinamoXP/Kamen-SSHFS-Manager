@@ -1,6 +1,6 @@
 {
-  "version": "1.7.0",
+  "version": "1.7.2",
   "name": "Kamen SSHFS Manager",
-  "released": "2026-10-18",
+  "released": "2026-10-20",
   "versioning": "major.minor.patch - minor and patch each cap at 9, then roll over (e.g. 1.1.9 -> 1.2.0, 1.9.9 -> 2.0.0)"
 }

@@ -7,13 +7,13 @@ letters, open SSH tunnels to web panels and databases, browse through a SOCKS
 proxy, and open a terminal in one click. Built on SSHFS-Win, with saved
 connections, 2FA support and automatic reconnect.
 
-![Kamen SSHFS Manager main window with three connections, two of them mounted](images/main.jpg?v=b18e8287)
+![Kamen SSHFS Manager main window with three connections, two of them mounted](images/main.jpg?v=0fad7066)
 
 ## Screenshots
 
 | New connection | Settings |
 |:---:|:---:|
-| ![Connection details form with Test Connection and Browse](images/new_connection.jpg?v=4625190b) | ![Settings window with theme, startup, connections, drive, update and logging options](images/settings.jpg?v=b0347228) |
+| ![Connection details form with Test Connection and Browse](images/new_connection.jpg?v=9899bd96) | ![Settings window with theme, startup, connections, drive, update and logging options](images/settings.jpg?v=4d7f1d75) |
 
 ## Features
 
@@ -45,7 +45,7 @@ connections, 2FA support and automatic reconnect.
   opening the window; the tray icon gets an orange dot if a drive hangs
 - Right-click a card for more actions, including **Duplicate**
 - Export and import connections (passwords are never exported)
-- Optional check for new releases on GitHub (off by default)
+- Checks GitHub for a new release when the app starts (can be turned off)
 - **Log File** button opens the folder with the log file
 - Live status polling (every 5 s) that can't freeze the app, with
   **Restart** / **Kill** for a drive that stops responding
@@ -92,9 +92,9 @@ Open with the **⚙ Settings** button. Defaults are shown in bold.
 | Appearance              | **Dark** / Light                                    |
 | Start with Windows      | **On** / Off (enabled on first run of the exe)      |
 | Start minimized to tray | **On** / Off (applies when Windows starts the app)  |
-| Restart a drive that stops responding | On / **Off** (after 60 s; interrupts any copy still running on that drive) |
+| Restart a drive that stops responding | **On** / Off (after 60 s; interrupts any copy still running on that drive) |
 | Enable debug log        | **On** / Off (also written to `kamen.log`)          |
-| Check for updates when the app starts | On / **Off** (shows a banner with a Download button when a newer release is out) |
+| Check for updates when the app starts | **On** / Off (shows a banner with a Download button when a newer release is out) |
 | Connections             | **Export...** / **Import...** a `.json` file of your connections (no passwords) |
 
 Imported connections get new ids, and if a drive letter is already used the
@@ -144,7 +144,7 @@ Files can be opened and copied off the drive, but not changed, created or
 deleted. The server's SFTP program is started in read-only mode, so this
 needs OpenSSH's `sftp-server` in one of the usual places
 (`/usr/lib/openssh/`, `/usr/libexec/openssh/`, `/usr/lib/ssh/`, `/usr/libexec/`,
-`/usr/lib/`). If it isn't found, connecting fails with a hint in the log.
+`/usr/lib/`). If it isn't found, connecting fails with a hint in the debug log.
 
 ### Interactive login (2FA)
 
@@ -198,8 +198,8 @@ opening it hangs), the app notices within about 10 seconds:
   process.
 - The rest of the app keeps working, and the app still opens normally while a
   drive is stuck.
-- With **Restart a drive that stops responding** turned on in Settings, the
-  app restarts it by itself after 60 seconds.
+- With **Restart a drive that stops responding** on (the default), the app
+  restarts it by itself after 60 seconds.
 
 Only one copy of the app runs at a time. Opening it again brings the running
 window to the front.
@@ -322,14 +322,15 @@ To check that a download is genuine:
 
 ## Privacy
 
-This program will not transfer any information to other networked systems
-unless specifically requested by the user or the person installing or
-operating it.
+The app collects no data and sends nothing about you or your connections
+anywhere. It connects to:
 
-The app connects only to the SSH servers you configure, and opens download
-pages in your browser only when you click a download button.
-If you turn on **Check for updates when the app starts** (off by default),
-it also asks GitHub for the newest release version on each start.
+- the SSH servers you configure;
+- GitHub, once per start, to read the newest release version, while
+  **Check for updates when the app starts** is on (the default). Nothing is
+  sent except a normal web request. Turn it off in Settings to stop this.
+
+Download pages open in your browser only when you click a download button.
 
 ## Support
 
