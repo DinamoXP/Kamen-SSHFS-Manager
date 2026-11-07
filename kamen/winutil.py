@@ -31,6 +31,62 @@ def human_size(n):
             return f"{n:.0f} {unit}" if n >= 100 or unit == "bytes" else f"{n:.1f} {unit}"
         n /= 1024
 
+class _ICMP_ECHO_REPLY(ctypes.Structure):
+    _fields_ = [("Address", wt.ULONG), ("Status", wt.ULONG), ("RoundTripTime", wt.ULONG),
+                ("DataSize", wt.USHORT), ("Reserved", wt.USHORT), ("Data", ctypes.c_void_p),
+                ("Options", ctypes.c_byte * 8)]
+
+class _SOCKADDR_IN6(ctypes.Structure):
+    _fields_ = [("family", ctypes.c_short), ("port", ctypes.c_ushort), ("flowinfo", wt.ULONG),
+                ("addr", ctypes.c_ubyte * 16), ("scope_id", wt.ULONG)]
+
+class _ICMPV6_ECHO_REPLY(ctypes.Structure):
+    _fields_ = [("port", ctypes.c_ushort), ("flowinfo", wt.ULONG),
+                ("addr", ctypes.c_ushort * 8), ("scope_id", wt.ULONG),
+                ("Status", wt.ULONG), ("RoundTripTime", ctypes.c_uint)]
+
+def ping_ms(host, timeout_ms=1000):
+    """One ICMP echo (like ping.exe) to `host`: round trip in ms, or None if
+    there's no answer (some servers block ping). Blocks up to timeout_ms, so
+    call it from a worker thread. No connection to the SSH port, so nothing
+    shows up in the server's SSH log."""
+    import socket
+    host = (host or "").strip().strip("[]")
+    try:
+        family, _, _, _, addr = socket.getaddrinfo(host, None)[0]
+    except (OSError, IndexError):
+        return None
+    icmp = ctypes.WinDLL("iphlpapi")
+    data = b"kamen-ping"
+    if family == socket.AF_INET:
+        icmp.IcmpCreateFile.restype = wt.HANDLE
+        h = icmp.IcmpCreateFile()
+        reply = ctypes.create_string_buffer(ctypes.sizeof(_ICMP_ECHO_REPLY) + len(data) + 8)
+        dest = int.from_bytes(socket.inet_aton(addr[0]), "little")
+        try:
+            n = icmp.IcmpSendEcho(wt.HANDLE(h), wt.ULONG(dest), data, len(data), None,
+                                  reply, len(reply), timeout_ms)
+            r = _ICMP_ECHO_REPLY.from_buffer_copy(reply)
+            return r.RoundTripTime if n and r.Status == 0 else None
+        finally:
+            icmp.IcmpCloseHandle(wt.HANDLE(h))
+    if family == socket.AF_INET6:
+        icmp.Icmp6CreateFile.restype = wt.HANDLE
+        h = icmp.Icmp6CreateFile()
+        src = _SOCKADDR_IN6(family=socket.AF_INET6)
+        dst = _SOCKADDR_IN6(family=socket.AF_INET6, scope_id=addr[3])
+        dst.addr[:] = list(socket.inet_pton(socket.AF_INET6, addr[0].split("%")[0]))
+        reply = ctypes.create_string_buffer(ctypes.sizeof(_ICMPV6_ECHO_REPLY) + len(data) + 8)
+        try:
+            n = icmp.Icmp6SendEcho2(wt.HANDLE(h), None, None, None, ctypes.byref(src),
+                                    ctypes.byref(dst), data, len(data), None, reply,
+                                    len(reply), timeout_ms)
+            r = _ICMPV6_ECHO_REPLY.from_buffer_copy(reply)
+            return r.RoundTripTime if n and r.Status == 0 else None
+        finally:
+            icmp.IcmpCloseHandle(wt.HANDLE(h))
+    return None
+
 def probe_drive(drive, timeout=3.0, want_space=False):
     """Return "unmounted", "mounted" or "hung". Can block up to `timeout`, so call it
     from worker threads only. At most one probe thread per drive: while an

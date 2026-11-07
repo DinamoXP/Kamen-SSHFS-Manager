@@ -87,49 +87,76 @@ class SSHProbe:
             raise RuntimeError(f"Can't load the 'paramiko' SSH library ({e}) - "
                                f"run: pip install paramiko")
         self._paramiko = paramiko
-        client = paramiko.SSHClient()
-        if conn.get("verify_host_key", False):
-            kh = Path.home() / ".ssh" / "known_hosts"
-            if kh.exists():
-                client.load_host_keys(str(kh))
-            client.set_missing_host_key_policy(
-                _AskHostKeyPolicy(prompt, kh) if prompt else paramiko.RejectPolicy())
-        else:
-            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-
-        kw = dict(hostname=bare_host(conn["host"]), port=int(conn.get("port", 22)),
-                  username=conn["user"], timeout=timeout, banner_timeout=timeout,
-                  auth_timeout=timeout, allow_agent=False, look_for_keys=False)
-        if conn.get("auth_type") == "key":
-            if not conn.get("key_path"):
-                raise RuntimeError("No private key file selected.")
-            kw["key_filename"] = conn["key_path"]
+        if conn.get("auth_type") == "key" and not conn.get("key_path"):
+            raise RuntimeError("No private key file selected.")
         pw = None
         if conn.get("auth_type") != "key":
             pw = password if password is not None else conn.get("password", "")
-
         try:
+            jump = parse_jump(conn.get("jump_host"), conn["user"])
+        except ValueError:
+            raise RuntimeError("Jump host can't be read - use user@host or user@host:port.")
+
+        def login(user, host, port, sock=None, label=""):
+            """One SSH login with this connection's settings. The jump host
+            (label "jump host ...") uses the same login as the server."""
+            client = paramiko.SSHClient()
+            if conn.get("verify_host_key", False):
+                kh = Path.home() / ".ssh" / "known_hosts"
+                if kh.exists():
+                    client.load_host_keys(str(kh))
+                client.set_missing_host_key_policy(
+                    _AskHostKeyPolicy(prompt, kh) if prompt else paramiko.RejectPolicy())
+            else:
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            kw = dict(hostname=bare_host(host), port=int(port), username=user, sock=sock,
+                      timeout=timeout, banner_timeout=timeout, auth_timeout=timeout,
+                      allow_agent=False, look_for_keys=False)
+            if conn.get("auth_type") == "key":
+                kw["key_filename"] = conn["key_path"]
             try:
-                client.connect(**kw)  # key auth here; password auth below
+                try:
+                    client.connect(**kw)  # key auth here; password auth below
+                except paramiko.SSHException as e:
+                    if kw.get("key_filename") or "No authentication methods" not in str(e):
+                        raise
+                    _password_auth(client.get_transport(), user, pw, prompt)
+                return client
+            except paramiko.AuthenticationException:
+                client.close()
+                raise RuntimeError(f"Authentication failed{label} - check username and "
+                                   f"password/key.")
             except paramiko.SSHException as e:
-                if kw.get("key_filename") or "No authentication methods" not in str(e):
-                    raise
-                _password_auth(client.get_transport(), conn["user"], pw, prompt)
+                client.close()
+                msg = str(e)
+                if "not found in known_hosts" in msg:
+                    msg = ("Server's host key is not in your known_hosts file. Untick "
+                           "'Verify SSH host key', or connect once with ssh to trust it.")
+                raise RuntimeError(msg + label)
+            except OSError as e:
+                client.close()
+                raise RuntimeError(f"Can't reach {host}:{port}{label} - {e.strerror or e}")
+
+        self._jump = None
+        sock = None
+        port = int(conn.get("port", 22))
+        if jump:
+            ju, jh, jp = jump
+            self._jump = login(ju, jh, jp, label=f" (jump host {jh})")
+            try:
+                sock = self._jump.get_transport().open_channel(
+                    "direct-tcpip", (bare_host(conn["host"]), port), ("127.0.0.1", 0),
+                    timeout=timeout)
+            except Exception as e:
+                self._jump.close()
+                raise RuntimeError(f"The jump host {jh} can't reach {conn['host']}:{port} - {e}")
+        try:
+            client = login(conn["user"], conn["host"], port, sock)
             self.sftp = client.open_sftp()
-        except paramiko.AuthenticationException:
-            client.close()
-            raise RuntimeError("Authentication failed - check username and password/key.")
-        except paramiko.SSHException as e:
-            client.close()
-            msg = str(e)
-            if "not found in known_hosts" in msg:
-                msg = ("Server's host key is not in your known_hosts file. Untick "
-                       "'Verify SSH host key', or connect once with ssh to trust it.")
-            raise RuntimeError(msg)
-        except OSError as e:
-            client.close()
-            raise RuntimeError(f"Can't reach {conn['host']}:{kw['port']} - "
-                               f"{e.strerror or e}")
+        except Exception:
+            if self._jump:
+                self._jump.close()
+            raise
         self.client = client
         self.home = self.sftp.normalize(".")
 
@@ -159,6 +186,9 @@ class SSHProbe:
     def close(self):
         try: self.client.close()
         except Exception: pass
+        if self._jump:
+            try: self._jump.close()
+            except Exception: pass
 
 def bare_host(host):
     """Host without surrounding [brackets], which users may type for IPv6."""
@@ -166,6 +196,73 @@ def bare_host(host):
     if host.startswith("[") and host.endswith("]"):
         host = host[1:-1]
     return host
+
+def parse_jump(spec, default_user):
+    """Jump host field "[user@]host[:port]" (an IPv6 address needs [brackets]
+    when a port is given) -> (user, host, port), or None when empty.
+    Raises ValueError if it can't be read."""
+    spec = (spec or "").strip()
+    if not spec:
+        return None
+    user, _, rest = spec.rpartition("@")
+    port = "22"
+    if rest.startswith("["):
+        host, _, tail = rest[1:].partition("]")
+        if tail.startswith(":"):
+            port = tail[1:]
+        elif tail:
+            raise ValueError(spec)
+    elif rest.count(":") == 1:
+        host, port = rest.split(":")
+    else:
+        host = rest  # host name, IPv4, or IPv6 without a port
+    port = int(port)
+    if not host or any(ch.isspace() for ch in host) or not 0 < port < 65536:
+        raise ValueError(spec)
+    return user or default_user, host, port
+
+def jump_hop_args(conn, ssh):
+    """ssh command for the jump hop: `ssh -W` to the real server through the
+    jump host, with this connection's login settings. ssh fills in %h and %p."""
+    user, host, port = parse_jump(conn.get("jump_host"), conn["user"])
+    args = [ssh, "-p", str(port)]
+    if not conn.get("verify_host_key", False):
+        args += ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null"]
+    if conn.get("auth_type") == "key" and conn.get("key_path"):
+        args += ["-i", conn["key_path"].replace("\\", "/"), "-o", "IdentitiesOnly=yes"]
+    return args + ["-W", "[%h]:%p", f"{user}@{host}"]
+
+def _jump_opts(conn, ssh):
+    """Windows ssh options to reach the server through the jump host, if set."""
+    if not conn.get("jump_host"):
+        return []
+    return ["-o", "ProxyCommand=" + subprocess.list2cmdline(jump_hop_args(conn, ssh))]
+
+# SSHFS-Win's ssh has no shell to run a ProxyCommand with, so this app stands
+# in as the shell: ssh runs "<SHELL> -c 'exec ssh ...'" and jump_shell_main
+# starts that one ssh (and nothing else) with ssh's own stdin/stdout.
+JUMP_ENV = "KAMEN_SSHFS_JUMP_SSH"
+
+def jump_shell_main(command):
+    import msvcrt, shlex
+    ssh = os.environ.get(JUMP_ENV, "")
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return 127
+    if words[:1] == ["exec"]:
+        words = words[1:]
+    if not words or words[0] != "ssh" or not os.path.isfile(ssh):
+        return 127
+    words[0] = ssh
+    k32 = ctypes.windll.kernel32
+    k32.GetStdHandle.restype = wt.HANDLE
+    std = []
+    for n in (-10, -11, -12):  # stdin, stdout, stderr: ssh's pipes
+        h = k32.GetStdHandle(n)
+        std.append(msvcrt.open_osfhandle(h, 0) if h and h != -1 else subprocess.DEVNULL)
+    return subprocess.call(words, stdin=std[0], stdout=std[1], stderr=std[2],
+                           creationflags=subprocess.CREATE_NO_WINDOW)
 
 KEYS_DIR = CONFIG_PATH.parent / "keys"
 
@@ -304,6 +401,7 @@ def open_ssh_terminal(conn):
         env.update({"SSH_ASKPASS": _askpass_program(),
                     "SSH_ASKPASS_REQUIRE": "force",
                     ASKPASS_ENV: conn["id"]})
+    args += _jump_opts(conn, ssh)
     args += ["-t", f"{conn['user']}@{bare_host(conn['host'])}"]
 
     # Start the shell in the mounted folder. Skip characters cmd.exe would
@@ -335,6 +433,9 @@ DB_PORTS = {3306, 5432, 1433, 1521, 6379, 27017}
 def describe_tunnel(t):
     if t["type"] == "socks":
         return f"SOCKS proxy on 127.0.0.1:{t['local_port']}"
+    if t["type"] == "remote":
+        return (f"Server port {t['remote_port']} -> {t.get('local_host') or '127.0.0.1'}"
+                f":{t['local_port']} on this PC")
     return (f"127.0.0.1:{t['local_port']} -> {t.get('remote_host') or '127.0.0.1'}"
             f":{t['remote_port']} on the server")
 
@@ -364,11 +465,18 @@ def _tunnel_ssh_args(conn, t):
         args += ["-i", conn["key_path"], "-o", "IdentitiesOnly=yes"]
     if t["type"] == "socks":
         args += ["-D", f"127.0.0.1:{t['local_port']}"]
+    elif t["type"] == "remote":
+        # The server listens on its own 127.0.0.1 and sends connections to this PC
+        lh = t.get("local_host") or "127.0.0.1"
+        if ":" in lh:
+            lh = f"[{lh}]"
+        args += ["-R", f"{t['remote_port']}:{lh}:{t['local_port']}"]
     else:
         rh = t.get("remote_host") or "127.0.0.1"
         if ":" in rh:
             rh = f"[{rh}]"
         args += ["-L", f"127.0.0.1:{t['local_port']}:{rh}:{t['remote_port']}"]
+    args += _jump_opts(conn, ssh)
     args.append(f"{conn['user']}@{bare_host(conn['host'])}")
     return args
 
@@ -379,6 +487,7 @@ class TunnelManager:
     ACTIVE = ("starting", "running", "retrying")
     FATAL = ("Permission denied", "Host key verification failed", "already in use",
              "Could not request local forwarding", "Too many authentication failures",
+             "remote port forwarding failed",
              "No SSH client")
     NOISE = ("Authenticated to", "Local connections to", "Connection to port",
              "channel ", "Warning: Permanently added", "Transferred:",
@@ -451,7 +560,8 @@ class TunnelManager:
         delay = 10
         while not rec["stop"].is_set():
             self._set(rec, "starting")
-            if not port_free(t["local_port"]):
+            remote = t["type"] == "remote"
+            if not remote and not port_free(t["local_port"]):
                 msg = f"Port {t['local_port']} is already in use on this PC."
                 log(f"[TUNNEL] {label}: {msg}\n")
                 self._set(rec, "error", msg)
@@ -486,7 +596,16 @@ class TunnelManager:
                         self._set(rec, "running")
                         return
                     time.sleep(0.25)
-            threading.Thread(target=watch_port, daemon=True).start()
+            def settle(proc=proc):
+                # A remote tunnel listens on the server, so there's no local port
+                # to watch. With ExitOnForwardFailure ssh quits at once if the
+                # server refuses the port; still running after login = working.
+                time.sleep(2)
+                if proc.poll() is None and not rec["stop"].is_set() and rec["state"] == "starting":
+                    log(f"[TUNNEL] {label} is running.\n")
+                    self._set(rec, "running")
+            if not remote:
+                threading.Thread(target=watch_port, daemon=True).start()
 
             last = ""
             for raw in proc.stderr:
@@ -494,6 +613,8 @@ class TunnelManager:
                 if not line:
                     continue
                 file_log(f"[TUNNEL] {t['name']}: {line}")
+                if remote and line.startswith("Authenticated to"):
+                    threading.Thread(target=settle, daemon=True).start()
                 if not line.startswith(self.NOISE):
                     last = line
             if rec["state"] == "running":

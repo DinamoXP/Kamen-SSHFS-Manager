@@ -12,7 +12,9 @@ from .config import (
 )
 from .ssh import (
     ASKPASS_ENV,
+    JUMP_ENV,
     _askpass_program,
+    jump_hop_args,
     bare_host,
 )
 from .winutil import (
@@ -142,6 +144,27 @@ def sshfs_host(host):
     h = bare_host(host)
     return f"[{h}]" if ":" in h else h
 
+# Edit window checkboxes: (key, label, default, sshfs arguments, tooltip). The defaults
+# match how drives were mounted before these options existed.
+MOUNT_OPTIONS = [
+    ("follow_symlinks", "Follow symlinks", True, ["-ofollow_symlinks"],
+     "Show what symlinks on the server point to, instead of the links themselves"),
+    ("compression", "Compress data", False, ["-C"],
+     "Faster on slow connections, a little slower on fast ones"),
+    ("hide_dot_files", "Hide dot files", False, ["-odothidden"],
+     "Files and folders starting with a dot (.bashrc) get Windows' hidden attribute"),
+    ("no_dir_cache", "No folder cache", False, ["-odir_cache=no"],
+     "Always show the newest files, e.g. when others change them on the server. "
+     "Folders open a little slower"),
+    ("rename_fix", "Rename fix", False, ["-oworkaround=rename"],
+     "For older servers that refuse saving over an existing file by renaming "
+     "(some programs save that way)"),
+]
+
+def mount_option(conn, key):
+    default = next(o[2] for o in MOUNT_OPTIONS if o[0] == key)
+    return bool(conn.get("mount_options", {}).get(key, default))
+
 def connect(conn, log=None):
     cid, drive = conn["id"], conn["drive_letter"]
     state = probe_drive(drive)
@@ -181,7 +204,6 @@ def connect(conn, log=None):
         "-oumask=000",
         "-ocreate_umask=000",
         "-oallow_other",
-        "-ofollow_symlinks",
         # Notice a dead link within ~45 s and reconnect instead of hanging
         "-oServerAliveInterval=15",
         "-oServerAliveCountMax=3",
@@ -190,6 +212,10 @@ def connect(conn, log=None):
     # Debug logging is opt-in per connection (extra_args: "-odebug -ologlevel=debug1")
     # Default-on debug was making file ops synchronous -> 38MB took forever and
     # the log flood froze the UI.
+
+    for key, _, _, opt_args, _ in MOUNT_OPTIONS:
+        if mount_option(conn, key):
+            args += opt_args
 
     if conn.get("read_only"):
         # SSHFS-Win ignores "-o ro", so: read-only permissions on the Windows
@@ -214,6 +240,11 @@ def connect(conn, log=None):
         args += ["-oPreferredAuthentications=publickey,keyboard-interactive",
                  f"-oIdentityFile={conn['key_path'].replace(chr(92), '/')}"]
 
+    if conn.get("jump_host"):
+        # Through a jump host: ssh runs this app as its "shell" for the hop
+        import shlex
+        args.append("-oProxyCommand=" + shlex.join(jump_hop_args(conn, "ssh")))
+
     for opt in conn.get("extra_args", "").split():
         args.append(opt)
 
@@ -231,6 +262,9 @@ def connect(conn, log=None):
     env["PATH"] = sshfs_dir + os.pathsep + env.get("PATH", "")
     env.update({"SSH_ASKPASS": _askpass_program(), "SSH_ASKPASS_REQUIRE": "force",
                 ASKPASS_ENV: conn["id"]})
+    if conn.get("jump_host"):
+        env.update({"SHELL": _askpass_program(),
+                    JUMP_ENV: os.path.join(sshfs_dir, "ssh.exe")})
 
     try:
         proc = subprocess.Popen(

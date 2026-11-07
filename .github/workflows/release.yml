@@ -48,6 +48,12 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt pyinstaller==6.17.0
 
+      # A broken build must not reach anyone through Update Now: stop here if a
+      # test fails (the release then gets no SHA256SUMS.txt, so the app won't
+      # offer it).
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
       - name: Build exe
         run: |
           python tools/make_version_info.py

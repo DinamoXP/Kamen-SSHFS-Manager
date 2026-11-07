@@ -21,6 +21,12 @@ def can_self_update():
     return getattr(sys, "frozen", False)
 
 
+def _exe():
+    """The real exe file. A winget install may start the app through a link;
+    an update must replace the file itself, not the link."""
+    return Path(os.path.realpath(sys.executable))
+
+
 def _get(url, timeout=30):
     req = urllib.request.Request(url, headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}"})
     return urllib.request.urlopen(req, timeout=timeout)
@@ -38,7 +44,7 @@ def download(info, progress=None):
             want = parts[0].lower()
     if not want:
         raise RuntimeError("SHA256SUMS.txt has no line for the exe.")
-    exe = Path(sys.executable)
+    exe = _exe()
     new = exe.with_name(exe.name + ".new")
     h = hashlib.sha256()
     try:
@@ -66,7 +72,7 @@ def download(info, progress=None):
 def old_path():
     """Free name for the old exe during an update: <name>.exe.old next to it,
     or <name>2.exe.old, <name>3.exe.old ... if a kept backup already has it."""
-    exe = Path(sys.executable)
+    exe = _exe()
     old = exe.with_name(exe.name + ".old")
     n = 2
     while old.exists():
@@ -79,7 +85,7 @@ def swap_in(new, old):
     """Put the downloaded exe in place of the running one. Windows lets a
     running exe be renamed (not deleted), so the old one is renamed to `old`
     (from old_path). The new copy deletes it unless the user chose to keep it."""
-    exe = Path(sys.executable)
+    exe = _exe()
     os.replace(exe, old)
     try:
         os.replace(new, exe)
@@ -91,7 +97,7 @@ def swap_in(new, old):
 def start_new(reconnect_ids, old, keep_old=False):
     """Start the updated exe. It waits for this copy to exit (see
     claim_single_instance) and connects the drives that were connected."""
-    args = [sys.executable, UPDATED_ARG]
+    args = [str(_exe()), UPDATED_ARG]
     args.append(KEEP_OLD_ARG if keep_old else REMOVE_OLD_ARG + str(old))
     if reconnect_ids:
         args.append(RECONNECT_ARG + ",".join(reconnect_ids))
@@ -107,7 +113,7 @@ def cleanup_old():
     argv = sys.argv[1:]
     if not can_self_update() or UPDATED_ARG not in argv or KEEP_OLD_ARG in argv:
         return
-    exe = Path(sys.executable)
+    exe = _exe()
     old = exe.with_name(exe.name + ".old")  # 1.7.4 doesn't pass the name
     for a in argv:
         if a.startswith(REMOVE_OLD_ARG):

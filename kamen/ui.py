@@ -33,10 +33,12 @@ from .config import (
     setup_file_log,
 )
 from .mounts import (
+    MOUNT_OPTIONS,
     _find_sshfs_pids_for_drive,
     connect,
     disconnect,
     missing_requirements,
+    mount_option,
 )
 from .ssh import (
     ASKPASS_ENV,
@@ -49,6 +51,7 @@ from .ssh import (
     _write_stdout,
     describe_tunnel,
     open_ssh_terminal,
+    parse_jump,
     setup_key_login,
 )
 from .winutil import (
@@ -56,6 +59,7 @@ from .winutil import (
     drive_space,
     human_size,
     letter_present,
+    ping_ms,
     probe_drive,
 )
 
@@ -532,17 +536,27 @@ class Card(tk.Frame):
         menu.add_command(label="Edit...", command=self._edit)
         menu.add_command(label="Duplicate", command=lambda: self.mgr.duplicate_connection(self.conn["id"]))
         menu.add_command(label="Delete", command=self._delete)
+        menu.add_separator()
+        ids = [c["id"] for c in self.mgr._connections]
+        i, last, cid = ids.index(self.conn["id"]), len(ids) - 1, self.conn["id"]
+        for label, to, ok in (("Move to Top", 0, i > 0), ("Move Up", i - 1, i > 0),
+                              ("Move Down", i + 1, i < last), ("Move to Bottom", last, i < last)):
+            menu.add_command(label=label, state="normal" if ok else "disabled",
+                             command=lambda to=to: self.mgr.move_connection(cid, to))
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
             menu.grab_release()
 
-    def set_space(self, space):
-        if space and self._status == "connected":
-            free, total = space
-            self.lbl_space.configure(text=f"  ·  {human_size(free)} free of {human_size(total)}")
-        else:
-            self.lbl_space.configure(text="")
+    def set_space(self, space, ping=None):
+        text = ""
+        if self._status == "connected":
+            if space:
+                free, total = space
+                text += f"  ·  {human_size(free)} free of {human_size(total)}"
+            if ping is not None:
+                text += f"  ·  {ping} ms" if ping else "  ·  <1 ms"
+        self.lbl_space.configure(text=text)
         self.mgr.fit_width()
 
     def update_tunnel_count(self):
@@ -552,7 +566,14 @@ class Card(tk.Frame):
     def _host_part(self):
         c = self.conn
         ro = "  ·  read-only" if c.get("read_only") else ""
-        return f"{c['user']}@{c['host']}  ·  port {c.get('port', 22)}{ro}"
+        via = ""
+        try:
+            jump = parse_jump(c.get("jump_host"), c["user"])
+            if jump:
+                via = f"  ·  via {jump[1]}"
+        except ValueError:
+            pass
+        return f"{c['user']}@{c['host']}  ·  port {c.get('port', 22)}{via}{ro}"
 
     def _refresh(self):
         """Uses the poll worker's cached state; never touches the drive."""
@@ -830,23 +851,45 @@ class EditDialog(tk.Toplevel):
         self.e_extra = entry(10)
         self.e_extra.insert(0, self.conn.get("extra_args",""))
 
+        # Optional jump host (ProxyJump)
+        lbl("Jump Host", 11)
+        self.e_jump = entry(11)
+        self.e_jump.insert(0, self.conn.get("jump_host", ""))
+        mk_label(form, "Optional: a server to connect through (user@host:port), with the "
+                 "same login.",
+                 fg=FG_MUTED, font=FONT_SMALL, wraplength=430, justify="left").grid(
+            row=12, column=0, columnspan=2, sticky="w", padx=(14, 14), pady=(0, 4))
+
         # Read/write (default) or read-only
-        lbl("Access", 11)
+        lbl("Access", 13)
         self.ro_var = tk.BooleanVar(value=self.conn.get("read_only", False))
         rf = tk.Frame(form, bg=BG)
-        rf.grid(row=11, column=1, sticky="w", pady=5)
+        rf.grid(row=13, column=1, sticky="w", pady=5)
         for v, t in [(False, "Read/Write"), (True, "Read-only")]:
             tk.Radiobutton(rf, text=t, variable=self.ro_var, value=v,
                            bg=BG, fg=FG, selectcolor=BG_INPUT,
                            activebackground=BG, activeforeground=FG,
                            font=FONT).pack(side="left", padx=5)
 
+        # Mount options (sshfs settings that used to need Extra Args)
+        mk_label(form, "Options", fg=FG_MUTED, font=FONT_SMALL).grid(
+            row=14, column=0, sticky="ne", padx=(14, 8), pady=(7, 5))
+        of = tk.Frame(form, bg=BG)
+        of.grid(row=14, column=1, sticky="w", pady=5)
+        self.opt_vars = {}
+        for i, (key, text, _, _, tip) in enumerate(MOUNT_OPTIONS):
+            var = self.opt_vars[key] = tk.BooleanVar(value=mount_option(self.conn, key))
+            cb = tk.Checkbutton(of, text=text, variable=var, bg=BG, fg=FG, selectcolor=BG_INPUT,
+                                activebackground=BG, activeforeground=FG, font=FONT)
+            cb.grid(row=i // 3, column=i % 3, sticky="w", padx=(0, 10))
+            Tooltip(cb, tip)
+
         # Auto connect
         self.auto_var = tk.BooleanVar(value=self.conn.get("auto_connect", False))
         tk.Checkbutton(form, text="Connect automatically when the app starts", variable=self.auto_var,
                        bg=BG, fg=FG, selectcolor=BG_INPUT,
                        activebackground=BG, activeforeground=FG,
-                       font=FONT).grid(row=12, column=1, sticky="w", pady=(8, 0))
+                       font=FONT).grid(row=15, column=1, sticky="w", pady=(8, 0))
 
         # Verify host key
         self.verify_var = tk.BooleanVar(value=self.conn.get("verify_host_key", False))
@@ -854,7 +897,7 @@ class EditDialog(tk.Toplevel):
                        variable=self.verify_var,
                        bg=BG, fg=FG, selectcolor=BG_INPUT,
                        activebackground=BG, activeforeground=FG,
-                       font=FONT).grid(row=13, column=1, sticky="w", pady=(0, 8))
+                       font=FONT).grid(row=16, column=1, sticky="w", pady=(0, 8))
 
         self._auth_change()
 
@@ -917,6 +960,7 @@ class EditDialog(tk.Toplevel):
             "auth_type": self.auth_var.get(), "password": self.e_pass.get(),
             "key_path": self.e_key.get().strip(),
             "verify_host_key": self.verify_var.get(),
+            "jump_host": self.e_jump.get().strip(),
         })
         return c
 
@@ -1060,11 +1104,20 @@ class EditDialog(tk.Toplevel):
             "auto_connect":    self.auto_var.get(),
             "verify_host_key": self.verify_var.get(),
             "read_only":       self.ro_var.get(),
+            "jump_host":       self.e_jump.get().strip(),
+            "mount_options":   {k: v.get() for k, v in self.opt_vars.items()},
         })
         if not self.conn["host"]:
             messagebox.showerror("Validation","Host is required.", parent=self); return
         if not self.conn["user"]:
             messagebox.showerror("Validation","Username is required.", parent=self); return
+        try:
+            parse_jump(self.conn["jump_host"], self.conn["user"])
+        except ValueError:
+            messagebox.showerror("Validation", "Jump Host can't be read. Use host, user@host "
+                                 "or user@host:port (IPv6 with a port: user@[address]:port).",
+                                 parent=self)
+            return
         self.on_save(self.conn, apply)
         self.destroy()
 
@@ -1263,23 +1316,27 @@ class TunnelDialog(tk.Toplevel):
         self.type_var = tk.StringVar(value=self.t.get("type", "local"))
         tf = tk.Frame(form, bg=BG)
         tf.grid(row=2, column=1, sticky="w", pady=5)
-        for value, text in (("local", "Web panel / database"), ("socks", "SOCKS proxy")):
+        for value, text in (("local", "Web panel / database"), ("socks", "SOCKS proxy"),
+                            ("remote", "Remote")):
             tk.Radiobutton(tf, text=text, variable=self.type_var, value=value,
                            command=self._type_change, **radio).pack(side="left", padx=(0, 10))
 
-        lbl("Local port", 3)
+        # A remote tunnel uses the same three fields: the port it opens on the
+        # server, then the target on this side (see _type_change)
+        remote = self.t.get("type") == "remote"
+        self.lbl_lport = lbl("Local port", 3)
         self.e_lport = mk_entry(form, width=8)
         self.e_lport.grid(row=3, column=1, sticky="w", padx=(0, 14), pady=5)
-        self.e_lport.insert(0, str(self.t.get("local_port", 8080)))
+        self.e_lport.insert(0, str(self.t.get("remote_port" if remote else "local_port", 8080)))
 
         self.lbl_rhost = lbl("Target host", 4)
         self.e_rhost = mk_entry(form, width=30)
         self.e_rhost.grid(row=4, column=1, sticky="ew", padx=(0, 14), pady=5)
-        self.e_rhost.insert(0, self.t.get("remote_host", "127.0.0.1"))
+        self.e_rhost.insert(0, self.t.get("local_host" if remote else "remote_host", "127.0.0.1"))
         self.lbl_rport = lbl("Target port", 5)
         self.e_rport = mk_entry(form, width=8)
         self.e_rport.grid(row=5, column=1, sticky="w", padx=(0, 14), pady=5)
-        self.e_rport.insert(0, str(self.t.get("remote_port") or 80))
+        self.e_rport.insert(0, str(self.t.get("local_port" if remote else "remote_port") or 80))
 
         self.note = tk.Label(form, text="", bg=BG, fg=FG_MUTED, font=("Segoe UI", 8),
                              justify="left", anchor="w", wraplength=360)
@@ -1317,9 +1374,18 @@ class TunnelDialog(tk.Toplevel):
                 self._type_change()
 
     def _type_change(self):
-        socks = self.type_var.get() == "socks"
+        kind = self.type_var.get()
+        socks = kind == "socks"
         for w in (self.lbl_rhost, self.e_rhost, self.lbl_rport, self.e_rport):
             w.grid_remove() if socks else w.grid()
+        self.lbl_lport.configure(text="Server port" if kind == "remote" else "Local port")
+        if kind == "remote":
+            self.note.configure(text=(
+                "The server opens this port (on its own 127.0.0.1) and passes connections "
+                "to the target, as seen from this PC: 127.0.0.1 = this PC, or another "
+                "machine on your network. Example: let the server reach a web project "
+                "running on this PC."))
+            return
         self.note.configure(text=(
             "Point your browser's proxy settings at SOCKS5 127.0.0.1 and the local "
             "port. Its traffic then goes out through the server."
@@ -1344,6 +1410,22 @@ class TunnelDialog(tk.Toplevel):
         if not name:
             messagebox.showerror("Tunnel", "Give the tunnel a name.", parent=self)
             return
+        kind = self.type_var.get()
+        if kind == "remote":
+            sport = self._port(self.e_lport, "Server port")
+            tport = self._port(self.e_rport, "Target port") if sport else None
+            if tport is None:
+                return
+            self.t.pop("remote_host", None)
+            self.t.update(name=name, type="remote", remote_port=sport, local_port=tport,
+                          local_host=self.e_rhost.get().strip() or "127.0.0.1",
+                          auto_start=self.auto_start.get(),
+                          auto_restart=self.auto_restart.get())
+            self.t.setdefault("id", str(int(time.time() * 1000)))
+            self.destroy()
+            self.on_save(self.t)
+            return
+        self.t.pop("local_host", None)
         lport = self._port(self.e_lport, "Local port")
         if lport is None:
             return
@@ -1450,8 +1532,10 @@ class TunnelsWindow(tk.Toplevel):
             mk_btn(bf, "✕", lambda t=t: self._delete(t)).pack(side="left", padx=2)
 
     def _used_ports(self, exclude_id=None):
+        # Ports this app listens on here (a remote tunnel's port is on the server)
         return {t["local_port"] for c in self.app._connections
-                for t in c.get("tunnels", []) if t.get("id") != exclude_id}
+                for t in c.get("tunnels", [])
+                if t.get("id") != exclude_id and t.get("type") != "remote"}
 
     def _toggle(self, t):
         if self.app.tunnels.is_active(t["id"]):
@@ -1774,6 +1858,7 @@ class App(tk.Tk):
         self._connections = load_connections()
         self._cards = {}
         self._fit_pending = False
+        self._ping = {}  # connection id -> last ping in ms (None: no answer)
         self._drive_state = {}  # drive -> "mounted" / "unmounted" / "hung", set by the poll worker
         self.tunnels = TunnelManager(self.on_tunnel_change)
         self._tunnel_windows = {}
@@ -2299,6 +2384,21 @@ class App(tk.Tk):
                     + "\n- ".join(need_pw))
         messagebox.showinfo("Import", msg, parent=parent)
 
+    def move_connection(self, cid, to):
+        """Card right-click > Move: put the connection at position `to`."""
+        i = next(n for n, c in enumerate(self._connections) if c["id"] == cid)
+        to = max(0, min(to, len(self._connections) - 1))
+        if to == i:
+            return
+        statuses = {k: c._status for k, c in self._cards.items()}
+        self._connections.insert(to, self._connections.pop(i))
+        save_connections(self._connections)
+        self._render()
+        for k, st in statuses.items():  # keep e.g. "Connecting..." on the moved cards
+            if k in self._cards:
+                self._cards[k]._set(st)
+        self._refresh_tray()
+
     def duplicate_connection(self, cid):
         """Copy a connection (without its tunnels, whose ports would clash) onto
         the next free drive letter, then open the copy for editing."""
@@ -2419,6 +2519,8 @@ class App(tk.Tk):
                         state = probe_drive(drive, want_space=want)
                         if want and state == "mounted":
                             space_at[drive] = time.time()
+                            threading.Thread(target=self._ping_server, args=(conn,),
+                                             daemon=True).start()
                     except Exception:
                         continue
                     if state == "hung":
@@ -2451,6 +2553,10 @@ class App(tk.Tk):
                     # main loop not started yet: try again on the next round
         threading.Thread(target=loop, daemon=True).start()
 
+    def _ping_server(self, conn):
+        """Poll worker, every 30 s per connected drive: ping time for its card."""
+        self._ping[conn["id"]] = ping_ms(conn["host"])
+
     def _report_hung(self, conn):
         """Runs on the poll worker, once per hang."""
         drive = conn["drive_letter"]
@@ -2475,7 +2581,8 @@ class App(tk.Tk):
             if card and card._status not in ("connecting", "stopping"):
                 card._set(status[state])
             if card:
-                card.set_space(drive_space.get(card.conn["drive_letter"]) if state == "mounted" else None)
+                card.set_space(drive_space.get(card.conn["drive_letter"]) if state == "mounted" else None,
+                               self._ping.get(cid))
         self._refresh_tray()
 
     def _listen_for_show(self):

@@ -7,13 +7,13 @@ letters, open SSH tunnels to web panels and databases, browse through a SOCKS
 proxy, and open a terminal in one click. Built on SSHFS-Win, with saved
 connections, 2FA support and automatic reconnect.
 
-![Kamen SSHFS Manager main window with three connections, two of them mounted](images/main.jpg?v=5ebda284)
+![Kamen SSHFS Manager main window with three connections, two of them mounted](images/main.jpg?v=0408a9af)
 
 ## Screenshots
 
 | New connection | Settings |
 |:---:|:---:|
-| ![Connection details form with Test Connection and Browse](images/new_connection.jpg?v=11858336) | ![Settings window with theme, startup, connections, drive, update and logging options](images/settings.jpg?v=ad72867e) |
+| ![Connection details form with Test Connection and Browse](images/new_connection.jpg?v=516857a0) | ![Settings window with theme, startup, connections, drive, update and logging options](images/settings.jpg?v=61daf004) |
 
 ## Features
 
@@ -27,6 +27,8 @@ connections, 2FA support and automatic reconnect.
   can be opened and copied, not changed
 - **Apply & Save** in the Edit window saves and reconnects the drive right
   away, so changes take effect without disconnecting by hand
+- **Jump host** support: reach a server through another server
+  (see [Jump Host](#jump-host))
 - Interactive login (2FA codes) and a **Trust this server?** prompt for new host keys
 - Passwords encrypted with Windows DPAPI (readable only by your Windows account)
 - **Test Connection** and a remote folder browser for picking the remote path
@@ -34,7 +36,8 @@ connections, 2FA support and automatic reconnect.
 - **SSH** button: opens a terminal session in the connection's remote folder,
   using the saved password automatically
 - **SSH tunnels**: reach web panels and databases on the server, or browse
-  through it with a SOCKS proxy (see [SSH Tunnels](#ssh-tunnels))
+  through it with a SOCKS proxy, or let the server reach this PC with a
+  remote tunnel (see [SSH Tunnels](#ssh-tunnels))
 - Connect automatically when the app starts (per connection)
 - Start with Windows, minimized to the tray (on by default); auto-connect
   retries for about a minute at login while the network comes up
@@ -43,10 +46,13 @@ connections, 2FA support and automatic reconnect.
 - Checks for WinFsp and SSHFS-Win on startup and links to the downloads
 - Exit disconnects all drives in the background with a progress window
 - Open a mounted drive in Explorer by clicking its drive tile (e.g. `I:\`)
-- Free space shown on each connected drive's card
+- Free space and ping time shown on each connected drive's card (the ping
+  is a normal ICMP ping every 30 s; nothing appears if the server blocks ping)
 - Tray menu: connect, disconnect, open drives and start tunnels without
   opening the window; the tray icon gets an orange dot if a drive hangs
-- Right-click a card for more actions, including **Duplicate**
+- Right-click a card for more actions, including **Duplicate** and
+  **Move Up** / **Move Down** / **Move to Top** / **Move to Bottom** to
+  change the order
 - Export and import connections (passwords are never exported)
 - Checks GitHub for a new release at start and once a day, and updates
   itself with **Update Now** (see [Updates](#updates); can be turned off)
@@ -174,6 +180,33 @@ password. The app:
 3. Checks that a login with only the key works, then switches the connection
    to **Private Key** and offers to forget the saved password.
 
+### Jump Host
+
+For a server you can't reach directly (e.g. behind a gateway or bastion
+server), fill in **Jump Host** in the Edit window: `jump.example.com`,
+`user@jump.example.com` or `user@jump.example.com:2222` (an IPv6 address
+with a port goes in brackets: `user@[2001:db8::5]:22`). The username defaults
+to the connection's.
+
+The drive, **Test Connection**, the folder browser, **Key login...**, the
+**SSH** button and tunnels all go through the jump host. It uses the same
+login as the server (the same key, or the saved password); if its password is
+different, a popup asks for it. The card shows "via" and the jump host.
+
+### Mount Options
+
+**Options** in the Edit window (hover over each for a short explanation):
+
+| Option | Default | What it does |
+|---|---|---|
+| Follow symlinks | On | Shows what symlinks on the server point to |
+| Compress data | Off | Faster on slow connections |
+| Hide dot files | Off | Files like `.bashrc` get Windows' hidden attribute |
+| No folder cache | Off | Always shows the newest files (e.g. changed by others); folders open a little slower |
+| Rename fix | Off | For older servers that refuse saving over an existing file by renaming |
+
+Anything else can still go in **Extra Args** (sshfs `-o` options).
+
 ### Read-only Mounts
 
 Set **Access** to **Read-only** in the New or Edit Connection window
@@ -255,6 +288,7 @@ how many are running, e.g. **Tunnels (2)**.
 |---|---|---|
 | **Web panel / database** | A service on the server (or on a machine the server can reach) that isn't open to your network | Open `127.0.0.1:<local port>` on this PC. **Open** starts your browser; for databases, **Copy** copies the address for your database client. Clicking a running tunnel's name or address does the same |
 | **SOCKS proxy** | Browsing through the server | Set your browser's proxy to **SOCKS5**, host `127.0.0.1`, the tunnel's local port |
+| **Remote** | The opposite direction: let the server reach something on this PC (or your network), e.g. a web project you're working on | The server opens **Server port** on its own `127.0.0.1` and passes connections to **Target host** / **Target port** as seen from this PC. On the server, use `127.0.0.1:<server port>` |
 
 Presets fill in common ports: Web panel (8080 -> 80), Portainer (9000),
 MySQL / MariaDB (3306), PostgreSQL (5432) and SOCKS proxy (1080). In the
@@ -299,6 +333,10 @@ pyinstaller --onefile --windowed --name "Kamen SSHFS Manager" --icon icon.ico --
 ```
 
 The exe is written to `dist\Kamen SSHFS Manager.exe`.
+
+Run the tests with `python -m unittest discover -s tests`. GitHub runs them on
+every push and before every release build; a release whose tests fail gets no
+`SHA256SUMS.txt`, so the app's **Update Now** won't offer it.
 
 `kamen_sshfs_manager.py` only starts the app; the code is in the `kamen/`
 package (`config`, `winutil`, `ssh`, `mounts`, `ui`), which PyInstaller picks up
