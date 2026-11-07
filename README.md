@@ -7,13 +7,13 @@ letters, open SSH tunnels to web panels and databases, browse through a SOCKS
 proxy, and open a terminal in one click. Built on SSHFS-Win, with saved
 connections, 2FA support and automatic reconnect.
 
-![Kamen SSHFS Manager main window with three connections, two of them mounted](images/main.jpg?v=0408a9af)
+![Kamen SSHFS Manager main window with three connections, two of them mounted](images/main.jpg?v=8a681a97)
 
 ## Screenshots
 
 | New connection | Settings |
 |:---:|:---:|
-| ![Connection details form with Test Connection and Browse](images/new_connection.jpg?v=516857a0) | ![Settings window with theme, startup, connections, drive, update and logging options](images/settings.jpg?v=61daf004) |
+| ![Connection details form with Test Connection and Browse](images/new_connection.jpg?v=516857a0) | ![Settings window with theme, startup, connections, drive, update and logging options](images/settings.jpg?v=cebc69a4) |
 
 ## Features
 

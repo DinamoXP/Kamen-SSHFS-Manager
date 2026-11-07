@@ -117,7 +117,7 @@ def cleanup_old():
     old = exe.with_name(exe.name + ".old")  # 1.7.4 doesn't pass the name
     for a in argv:
         if a.startswith(REMOVE_OLD_ARG):
-            old = Path(a[len(REMOVE_OLD_ARG):])
+            old = Path(os.path.realpath(a[len(REMOVE_OLD_ARG):]))
     # only ever an .old file next to this exe
     if old.parent != exe.parent or old.suffix != ".old" or not old.exists():
         return
