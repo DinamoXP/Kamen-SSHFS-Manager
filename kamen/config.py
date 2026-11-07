@@ -193,6 +193,8 @@ RUN_NAME = "Kamen SSHFS Manager"
 STARTUP_ARG = "--startup"
 UPDATED_ARG = "--updated"         # started by an update: wait for the old copy to exit
 RECONNECT_ARG = "--reconnect="    # ids of the connections to connect again after an update
+KEEP_OLD_ARG = "--keep-old"       # after an update: the user chose to keep the old exe
+REMOVE_OLD_ARG = "--remove-old="  # after an update: the old exe to delete
 
 def _startup_command():
     if getattr(sys, "frozen", False):

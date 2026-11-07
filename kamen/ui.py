@@ -1415,12 +1415,23 @@ class TunnelsWindow(tk.Toplevel):
             dot.grid(row=r, column=0, sticky="n", padx=(0, 8), pady=(8, 0))
             info = tk.Frame(self.rows, bg=BG)
             info.grid(row=r, column=1, sticky="ew", pady=4)
-            mk_label(info, t["name"], font=FONT_BOLD).pack(anchor="w")
-            mk_label(info, describe_tunnel(t), fg=FG_MUTED, font=FONT_SMALL).pack(anchor="w")
+            name = mk_label(info, t["name"], font=FONT_BOLD)
+            name.pack(anchor="w")
+            addr = mk_label(info, describe_tunnel(t), fg=FG_MUTED, font=FONT_SMALL)
+            addr.pack(anchor="w")
             text = {"running": "Running", "starting": "Starting…", "stopped": "Stopped"}.get(
                 state, msg)
-            mk_label(info, text, fg=colors.get(state, FG_MUTED), font=FONT_SMALL,
-                     wraplength=330, justify="left").pack(anchor="w")
+            status = mk_label(info, text, fg=colors.get(state, FG_MUTED), font=FONT_SMALL,
+                              wraplength=330, justify="left")
+            status.pack(anchor="w")
+            if t["type"] == "local" and state == "running":
+                # Clicking the tunnel's text does the same as its Open / Copy button
+                db = t.get("remote_port") in DB_PORTS
+                for w in (info, name, addr, status):
+                    w.configure(cursor="hand2")
+                    w.bind("<Button-1>", lambda e, t=t, db=db: self._open(t, db))
+                    w.bind("<Enter>", lambda e, a=addr: a.configure(fg=ACCENT))
+                    w.bind("<Leave>", lambda e, a=addr: a.configure(fg=FG_MUTED))
             bf = tk.Frame(self.rows, bg=BG)
             bf.grid(row=r, column=2, sticky="e", pady=4)
             active = state in TunnelManager.ACTIVE
@@ -1579,6 +1590,49 @@ class SettingsDialog(tk.Toplevel):
                              check_updates=self.update_var.get())
         self.destroy()
         self.on_save(self.settings)
+
+class UpdateDialog(tk.Toplevel):
+    """Asks before Update Now: what happens, and whether to keep the old exe.
+    Calls on_ok(keep_old)."""
+
+    def __init__(self, parent, version, old_name, on_ok):
+        super().__init__(parent)
+        self.withdraw()
+        self.on_ok = on_ok
+        self.title("Update")
+        self.configure(bg=BG)
+        self.resizable(False, False)
+        self.transient(parent)
+        mk_label(self, f"Update to version {version}?", font=FONT_LARGE).pack(
+            padx=24, pady=(16, 8), anchor="w")
+        mk_label(self, "The new version is downloaded from GitHub and checked, then the app "
+                 "restarts. Connected drives are disconnected and connected again after "
+                 "the restart, so any copy still running on them will fail. Running "
+                 "tunnels are stopped.", fg=FG_MUTED, font=FONT_SMALL, wraplength=420,
+                 justify="left").pack(padx=24, anchor="w")
+        mk_label(self, "Old version", font=FONT_BOLD).pack(padx=24, pady=(14, 2), anchor="w")
+        self.keep_var = tk.BooleanVar(value=False)
+        radio = dict(variable=self.keep_var, bg=BG, fg=FG, selectcolor=BG_INPUT,
+                     activebackground=BG, activeforeground=FG, font=FONT)
+        tk.Radiobutton(self, text="Delete it", value=False, **radio).pack(padx=(30, 24), anchor="w")
+        tk.Radiobutton(self, text="Keep it as a backup", value=True, **radio).pack(
+            padx=(30, 24), anchor="w")
+        mk_label(self, f"It is renamed to \"{old_name}\" in the app's folder. "
+                 "To use it again, rename it back to .exe. Older backups are not touched.",
+                 fg=FG_MUTED, font=FONT_SMALL, wraplength=400,
+                 justify="left").pack(padx=(48, 24), anchor="w")
+        bar = tk.Frame(self, bg=BG)
+        bar.pack(fill="x", padx=24, pady=(16, 16))
+        mk_btn(bar, "Update", self._ok, bg=SUCCESS, fg="white").pack(side="right", padx=(6, 0))
+        mk_btn(bar, "Cancel", self.destroy).pack(side="right")
+        self.bind("<Escape>", lambda e: self.destroy())
+        show_centered(self, parent)
+        self.grab_set()
+
+    def _ok(self):
+        keep = self.keep_var.get()
+        self.destroy()
+        self.on_ok(keep)
 
 class ShutdownDialog(tk.Toplevel):
     """Shown on Exit while drives unmount in background threads. Calls
@@ -2083,13 +2137,11 @@ class App(tk.Tk):
         b.pack(fill="x", side="top", after=self._hdr)
 
     def _update_now(self, info):
-        if not messagebox.askyesno("Update",
-                f"Update to version {info['version']}?\n\n"
-                "The new version is downloaded from GitHub and checked, then the app "
-                "restarts. Connected drives are disconnected and connected again after "
-                "the restart, so any copy still running on them will fail. Running "
-                "tunnels are stopped.", parent=self):
-            return
+        old = update.old_path()
+        UpdateDialog(self, info["version"], old.name,
+                     lambda keep: self._start_update(info, old, keep))
+
+    def _start_update(self, info, old, keep_old):
         for btn in self._update_btns:
             btn.configure(state="disabled")
         self._update_lbl.configure(text=f"Downloading version {info['version']}...")
@@ -2105,7 +2157,7 @@ class App(tk.Tk):
                 try: self.after(0, self._update_failed, info, str(e))
                 except RuntimeError: pass
                 return
-            try: self.after(0, self._install_update, info, new)
+            try: self.after(0, self._install_update, info, new, old, keep_old)
             except RuntimeError: pass
         threading.Thread(target=w, daemon=True).start()
 
@@ -2116,9 +2168,9 @@ class App(tk.Tk):
         self._update_info = None
         self._show_update(info)
 
-    def _install_update(self, info, new):
+    def _install_update(self, info, new, old, keep_old):
         try:
-            update.swap_in(new)
+            update.swap_in(new, old)
         except OSError as e:
             self.log(f"[ERROR] Couldn't replace the exe: {e}\n")
             self._update_failed(info, f"Couldn't replace the exe ({e}).")
@@ -2126,8 +2178,10 @@ class App(tk.Tk):
         self.log(f"[INFO] Updated to {info['version']}, restarting...\n")
         mounted = [c for c in self._connections if letter_present(c["drive_letter"])]
         ids = [c["id"] for c in mounted]
+        if keep_old:
+            self.log(f"[INFO] The old version is kept as {old}\n")
         def restart():
-            update.start_new(ids)
+            update.start_new(ids, old, keep_old)
             self._finish_close()
         self.tunnels.stop_all()
         self._stop.set()

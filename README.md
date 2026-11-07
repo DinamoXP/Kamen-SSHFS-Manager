@@ -119,7 +119,13 @@ the window say so. The banner has:
   against the release's `SHA256SUMS.txt`, swaps it in and restarts the app.
   Connected drives are disconnected first and connected again after the
   restart; running tunnels are stopped. A download that doesn't match the
-  checksum is never used.
+  checksum is never used. Before it starts, it asks what to do with the old
+  version:
+  - **Delete it** (default): it is removed after the restart.
+  - **Keep it as a backup**: it is renamed to `Kamen.SSHFS.Manager.exe.old`
+    in the app's folder (or `Kamen.SSHFS.Manager2.exe.old`, `3`, ... if a
+    backup is already there; older backups are never touched). To use it
+    again, rename it back to `.exe`.
 - **Release Notes**: opens the release page in your browser.
 - **Dismiss**: hides the banner until the next version.
 
@@ -242,7 +248,7 @@ how many are running, e.g. **Tunnels (2)**.
 
 | Type | Use it for | How to use it |
 |---|---|---|
-| **Web panel / database** | A service on the server (or on a machine the server can reach) that isn't open to your network | Open `127.0.0.1:<local port>` on this PC. **Open** starts your browser; for databases, **Copy** copies the address for your database client |
+| **Web panel / database** | A service on the server (or on a machine the server can reach) that isn't open to your network | Open `127.0.0.1:<local port>` on this PC. **Open** starts your browser; for databases, **Copy** copies the address for your database client. Clicking a running tunnel's name or address does the same |
 | **SOCKS proxy** | Browsing through the server | Set your browser's proxy to **SOCKS5**, host `127.0.0.1`, the tunnel's local port |
 
 Presets fill in common ports: Web panel (8080 -> 80), Portainer (9000),
