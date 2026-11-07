@@ -8,6 +8,7 @@ import threading
 import time
 
 from .config import (
+    CONFIG_PATH,
     file_log,
 )
 from .ssh import (
@@ -266,41 +267,47 @@ def connect(conn, log=None):
         env.update({"SHELL": _askpass_program(),
                     JUMP_ENV: os.path.join(sshfs_dir, "ssh.exe")})
 
+    # sshfs writes to a file, not a pipe to this app: a mount then keeps
+    # working while the app is closed or restarting (e.g. Update Now), instead
+    # of dying on its next message to a pipe nobody reads any more.
+    out_path = CONFIG_PATH.parent / f"sshfs-{drive[0].upper()}.log"
     try:
-        proc = subprocess.Popen(
-            args,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
+        with open(out_path, "wb") as out:
+            proc = subprocess.Popen(
+                args,
+                stdin=subprocess.DEVNULL,
+                stdout=out,
+                stderr=subprocess.STDOUT,
+                env=env,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
 
         _procs[cid] = proc
 
         result = [None]    # success flag set when mount is detected
         mounted = [False]  # flips True after mount - we stop logging then
 
-        def stream(pipe, prefix):
-            """Log lines while the mount is being established. Once mounted,
-            keep draining the pipe silently - if we don't read it, sshfs blocks
-            on full OS pipe buffers and file ops grind to a halt."""
+        def stream():
+            """Show sshfs's messages in the log while the mount is being set up."""
             try:
-                for line in pipe:
-                    txt = line.decode(errors="replace").rstrip()
-                    if mounted[0]:
-                        file_log(f"{prefix} {drive} {txt}")  # file only, no UI flood
-                        continue
-                    if "service sshfs has been started" in txt:
-                        result[0] = True
-                    if log: log(f"{prefix} {txt}\n")
-                    if log and txt.endswith(f":{remote}: No such file or directory"):
-                        log(f"[HINT] Remote path '{remote}' doesn't exist on the server. "
-                            f"Use Edit → Test Connection → Browse… to pick one.\n")
+                with open(out_path, "rb") as f:
+                    while not mounted[0]:
+                        line = f.readline()
+                        if not line:
+                            if proc.poll() is not None:
+                                return
+                            time.sleep(0.1)
+                            continue
+                        txt = line.decode(errors="replace").rstrip()
+                        if "service sshfs has been started" in txt:
+                            result[0] = True
+                        if log: log(f"[SSHFS] {txt}\n")
+                        if log and txt.endswith(f":{remote}: No such file or directory"):
+                            log(f"[HINT] Remote path '{remote}' doesn't exist on the server. "
+                                f"Use Edit → Test Connection → Browse… to pick one.\n")
             except Exception: pass
 
-        threading.Thread(target=stream, args=(proc.stderr, "[SSHFS]"), daemon=True).start()
-        threading.Thread(target=stream, args=(proc.stdout, "[OUT]"),   daemon=True).start()
+        threading.Thread(target=stream, daemon=True).start()
 
         if log: log(f"[INFO] Waiting for {drive} to mount "
                     f"(answer any login prompt that pops up)...\n")
@@ -314,6 +321,7 @@ def connect(conn, log=None):
                 _notify_explorer_drive_change(drive, added=True)
                 return True
             if proc.poll() is not None:
+                time.sleep(0.3)  # let stream() show sshfs's last words
                 if log: log(f"[ERROR] sshfs exited (code {proc.returncode}).\n")
                 if log and conn.get("read_only"):
                     log("[HINT] Read-only mounts need OpenSSH's sftp-server on the server. "

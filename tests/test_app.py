@@ -93,6 +93,14 @@ class MountOptions(unittest.TestCase):
 
 
 class Helpers(unittest.TestCase):
+    def test_io_total(self):
+        import os
+        first = winutil.io_total([os.getpid()])
+        self.assertIsInstance(first, int)
+        (ROOT / "version.json").read_bytes()  # some I/O
+        self.assertGreaterEqual(winutil.io_total([os.getpid()]), first)
+        self.assertIsNone(winutil.io_total([]))
+
     def test_human_size(self):
         self.assertEqual(winutil.human_size(512), "512 bytes")
         self.assertEqual(winutil.human_size(1536), "1.5 KB")

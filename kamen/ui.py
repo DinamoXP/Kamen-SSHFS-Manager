@@ -58,6 +58,7 @@ from .winutil import (
     _k32,
     drive_space,
     human_size,
+    io_total,
     letter_present,
     ping_ms,
     probe_drive,
@@ -1714,9 +1715,9 @@ class UpdateDialog(tk.Toplevel):
         mk_label(self, f"Update to version {version}?", font=FONT_LARGE).pack(
             padx=24, pady=(16, 8), anchor="w")
         mk_label(self, "The new version is downloaded from GitHub and checked, then the app "
-                 "restarts. Connected drives are disconnected and connected again after "
-                 "the restart, so any copy still running on them will fail. Running "
-                 "tunnels are stopped.", fg=FG_MUTED, font=FONT_SMALL, wraplength=420,
+                 "restarts. Connected drives stay connected, so open files and copies "
+                 "carry on. Running tunnels are stopped and the ones set to start with "
+                 "the app start again.", fg=FG_MUTED, font=FONT_SMALL, wraplength=420,
                  justify="left").pack(padx=24, anchor="w")
         mk_label(self, "Old version", font=FONT_BOLD).pack(padx=24, pady=(14, 2), anchor="w")
         self.keep_var = tk.BooleanVar(value=False)
@@ -2309,20 +2310,16 @@ class App(tk.Tk):
             self._update_failed(info, f"Couldn't replace the exe ({e}).")
             return
         self.log(f"[INFO] Updated to {info['version']}, restarting...\n")
-        mounted = [c for c in self._connections if letter_present(c["drive_letter"])]
-        ids = [c["id"] for c in mounted]
         if keep_old:
             self.log(f"[INFO] The old version is kept as {old}\n")
-        def restart():
-            update.start_new(ids, old, keep_old)
-            self._finish_close()
+        # Drives stay mounted: sshfs doesn't need this app, and the new copy
+        # picks them up on its first status check. Tunnels are stopped (the new
+        # copy starts the ones set to start with the app).
         self.tunnels.stop_all()
         self._stop.set()
         self._update_wake.set()
-        if mounted:
-            ShutdownDialog(self, mounted, on_done=restart)
-        else:
-            restart()
+        update.start_new([], old, keep_old)
+        self._finish_close()
 
     def export_connections(self, parent):
         path = filedialog.asksaveasfilename(
@@ -2510,6 +2507,7 @@ class App(tk.Tk):
             hits = {}        # drive -> consecutive "hung" probes
             space_at = {}    # drive -> last free-space check
             since = {}       # drive -> time it was first reported hung
+            io_seen = {}     # drive -> sshfs bytes moved at the last slow probe
             restarted = set()
             first = True
             while first or not self._stop.wait(5):
@@ -2527,6 +2525,17 @@ class App(tk.Tk):
                                              daemon=True).start()
                     except Exception:
                         continue
+                    if state == "hung":
+                        # Slow to answer while a big copy is running isn't
+                        # frozen: if sshfs moved data since the last slow
+                        # probe, it's busy, so don't count it (or restart it).
+                        io = io_total(_find_sshfs_pids_for_drive(drive))
+                        busy = io is not None and io_seen.get(drive) not in (None, io)
+                        io_seen[drive] = io
+                        if busy:
+                            state = "mounted"
+                    else:
+                        io_seen.pop(drive, None)
                     if state == "hung":
                         hits[drive] = hits.get(drive, 0) + 1
                         if hits[drive] < 2:

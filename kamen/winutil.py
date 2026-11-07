@@ -87,6 +87,27 @@ def ping_ms(host, timeout_ms=1000):
             icmp.IcmpCloseHandle(wt.HANDLE(h))
     return None
 
+class _IO_COUNTERS(ctypes.Structure):
+    _fields_ = [(n, ctypes.c_ulonglong) for n in (
+        "ReadOps", "WriteOps", "OtherOps", "ReadBytes", "WriteBytes", "OtherBytes")]
+
+def io_total(pids):
+    """Bytes read + written so far by these processes (sshfs talks to ssh
+    through pipes, so a transfer shows up here), or None if unknown."""
+    total, seen = 0, False
+    for pid in pids:
+        h = _k32.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            continue
+        try:
+            c = _IO_COUNTERS()
+            if _k32.GetProcessIoCounters(wt.HANDLE(h), ctypes.byref(c)):
+                total += c.ReadBytes + c.WriteBytes + c.OtherBytes
+                seen = True
+        finally:
+            _k32.CloseHandle(wt.HANDLE(h))
+    return total if seen else None
+
 def probe_drive(drive, timeout=3.0, want_space=False):
     """Return "unmounted", "mounted" or "hung". Can block up to `timeout`, so call it
     from worker threads only. At most one probe thread per drive: while an

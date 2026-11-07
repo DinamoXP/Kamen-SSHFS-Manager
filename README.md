@@ -10,7 +10,7 @@ connections, 2FA support and automatic reconnect.
 **[Download the latest version](https://github.com/DinamoXP/Kamen-SSHFS-Manager/releases/latest/download/Kamen.SSHFS.Manager.exe)** (Windows 10/11, 64-bit) and see
 [Install](#install).
 
-![Kamen SSHFS Manager main window with three connections, two of them mounted](images/main.jpg?v=09d9fdbb)
+![Kamen SSHFS Manager main window with three connections, two of them mounted](images/main.jpg?v=744f031f)
 
 ## Install
 
@@ -57,7 +57,7 @@ From then on, updates come through **Update Now**.
 
 | New connection | Settings |
 |:---:|:---:|
-| ![Connection details form with Test Connection and Browse](images/new_connection.jpg?v=516857a0) | ![Settings window with theme, startup, connections, drive, update and logging options](images/settings.jpg?v=3a637c8c) |
+| ![Connection details form with Test Connection and Browse](images/new_connection.jpg?v=516857a0) | ![Settings window with theme, startup, connections, drive, update and logging options](images/settings.jpg?v=30916763) |
 
 ## Features
 
@@ -126,7 +126,7 @@ Open with the **⚙ Settings** button. Defaults are shown in bold.
 | Appearance              | **Dark** / Light                                    |
 | Start with Windows      | **On** / Off (enabled on first run of the exe)      |
 | Start minimized to tray | **On** / Off (applies when Windows starts the app)  |
-| Restart a drive that stops responding | **On** / Off (after 60 s; interrupts any copy still running on that drive) |
+| Restart a drive that stops responding | **On** / Off (after 60 s of no answer and no data moving; a drive that is just busy with a big copy is never restarted) |
 | Enable debug log        | **On** / Off (also written to `kamen.log`)          |
 | Check for updates when the app starts | **On** / Off (at start and once a day; see [Updates](#updates)) |
 | Check for Updates (button) | Asks GitHub right now, even with the setting above off |
@@ -151,8 +151,9 @@ the window say so. The banner has:
 
 - **Update Now**: downloads the new exe from the GitHub release, checks it
   against the release's `SHA256SUMS.txt`, swaps it in and restarts the app.
-  Connected drives are disconnected first and connected again after the
-  restart; running tunnels are stopped. A download that doesn't match the
+  Connected drives **stay connected** (open files, copies and programs
+  using them carry on); running tunnels are stopped and the ones set to
+  start with the app start again. A download that doesn't match the
   checksum is never used. Before it starts, it asks what to do with the old
   version:
   - **Delete it** (default): it is removed after the restart.
@@ -297,6 +298,9 @@ opening it hangs), the app notices within about 10 seconds:
   drive is stuck.
 - With **Restart a drive that stops responding** on (the default), the app
   restarts it by itself after 60 seconds.
+- A drive that is slow only because it's busy (a big copy over a slow
+  connection) doesn't count: the app checks whether sshfs is still moving
+  data, and only a drive that is silent *and* idle is treated as frozen.
 
 Only one copy of the app runs at a time. Opening it again brings the running
 window to the front.
