@@ -7,13 +7,13 @@ letters, open SSH tunnels to web panels and databases, browse through a SOCKS
 proxy, and open a terminal in one click. Built on SSHFS-Win, with saved
 connections, 2FA support and automatic reconnect.
 
-![Kamen SSHFS Manager main window with three connections, two of them mounted](images/main.jpg?v=e18901a8)
+![Kamen SSHFS Manager main window with three connections, two of them mounted](images/main.jpg?v=4a73bdaf)
 
 ## Screenshots
 
 | New connection | Settings |
 |:---:|:---:|
-| ![Connection details form with Test Connection and Browse](images/new_connection.jpg?v=efe1babb) | ![Settings window with theme, startup, connections, drive, update and logging options](images/settings.jpg?v=4d7f1d75) |
+| ![Connection details form with Test Connection and Browse](images/new_connection.jpg?v=af057df5) | ![Settings window with theme, startup, connections, drive, update and logging options](images/settings.jpg?v=17fb97c0) |
 
 ## Features
 
@@ -48,7 +48,8 @@ connections, 2FA support and automatic reconnect.
   opening the window; the tray icon gets an orange dot if a drive hangs
 - Right-click a card for more actions, including **Duplicate**
 - Export and import connections (passwords are never exported)
-- Checks GitHub for a new release when the app starts (can be turned off)
+- Checks GitHub for a new release at start and once a day, and updates
+  itself with **Update Now** (see [Updates](#updates); can be turned off)
 - **Log File** button opens the folder with the log file
 - Live status polling (every 5 s) that can't freeze the app, with
   **Restart** / **Kill** for a drive that stops responding
@@ -97,12 +98,34 @@ Open with the **⚙ Settings** button. Defaults are shown in bold.
 | Start minimized to tray | **On** / Off (applies when Windows starts the app)  |
 | Restart a drive that stops responding | **On** / Off (after 60 s; interrupts any copy still running on that drive) |
 | Enable debug log        | **On** / Off (also written to `kamen.log`)          |
-| Check for updates when the app starts | **On** / Off (shows a banner with a Download button when a newer release is out) |
+| Check for updates when the app starts | **On** / Off (at start and once a day; see [Updates](#updates)) |
 | Connections             | **Export...** / **Import...** a `.json` file of your connections (no passwords) |
 
 Imported connections get new ids, and if a drive letter is already used the
 import picks a free one. Connections that used a saved password need it
 typed in again (the import lists them).
+
+## Updates
+
+With **Check for updates when the app starts** on (the default), the app asks
+GitHub for the newest release a few seconds after it starts and then once a
+day while it runs. If GitHub can't be reached, it tries again after 10
+minutes.
+
+When a newer version is out, a tray notification and a banner at the top of
+the window say so. The banner has:
+
+- **Update Now**: downloads the new exe from the GitHub release, checks it
+  against the release's `SHA256SUMS.txt`, swaps it in and restarts the app.
+  Connected drives are disconnected first and connected again after the
+  restart; running tunnels are stopped. A download that doesn't match the
+  checksum is never used.
+- **Release Notes**: opens the release page in your browser.
+- **Dismiss**: hides the banner until the next version.
+
+Update Now is only offered for the exe (not when running from source). If the
+exe's folder can't be written to, download the new version from the release
+page instead.
 
 ## Host Addresses
 
@@ -330,9 +353,10 @@ The app collects no data and sends nothing about you or your connections
 anywhere. It connects to:
 
 - the SSH servers you configure;
-- GitHub, once per start, to read the newest release version, while
+- GitHub, at start and once a day, to read the newest release version, while
   **Check for updates when the app starts** is on (the default). Nothing is
   sent except a normal web request. Turn it off in Settings to stop this.
+- GitHub, to download the new exe, only when you click **Update Now**.
 
 Download pages open in your browser only when you click a download button.
 

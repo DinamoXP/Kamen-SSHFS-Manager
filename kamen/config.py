@@ -139,14 +139,19 @@ def _version_tuple(v):
     return tuple(int(x) for x in re.findall(r"\d+", v)[:3])
 
 def latest_release():
-    """(version, url) of the newest GitHub release, or None if it can't be read."""
+    """The newest GitHub release as {"version", "url", "exe", "sums"} (the last
+    two are download links, or None), or None if it can't be read."""
     import urllib.request
     req = urllib.request.Request(RELEASES_API, headers={
         "Accept": "application/vnd.github+json", "User-Agent": f"{APP_NAME}/{APP_VERSION}"})
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             data = json.loads(r.read())
-        return data["tag_name"].lstrip("v."), data.get("html_url") or RELEASES_URL
+        assets = {a.get("name"): a.get("browser_download_url") for a in data.get("assets", [])}
+        return {"version": data["tag_name"].lstrip("v."),
+                "url": data.get("html_url") or RELEASES_URL,
+                "exe": assets.get("Kamen.SSHFS.Manager.exe"),
+                "sums": assets.get("SHA256SUMS.txt")}
     except Exception:
         return None
 
@@ -186,6 +191,8 @@ RUN_KEY  = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_NAME = "Kamen SSHFS Manager"
 
 STARTUP_ARG = "--startup"
+UPDATED_ARG = "--updated"         # started by an update: wait for the old copy to exit
+RECONNECT_ARG = "--reconnect="    # ids of the connections to connect again after an update
 
 def _startup_command():
     if getattr(sys, "frozen", False):

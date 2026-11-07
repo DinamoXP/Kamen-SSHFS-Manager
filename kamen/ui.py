@@ -1,6 +1,6 @@
 """All windows: main window, connection cards, dialogs, theme and tray."""
 
-from . import winutil
+from . import update, winutil
 import json
 import os
 import subprocess
@@ -15,6 +15,7 @@ from .config import (
     APP_VERSION,
     HUNG_RESTART_SECS,
     LOG_PATH,
+    RECONNECT_ARG,
     STARTUP_ARG,
     THEMES,
     _startup_command,
@@ -834,7 +835,7 @@ class EditDialog(tk.Toplevel):
         self.ro_var = tk.BooleanVar(value=self.conn.get("read_only", False))
         rf = tk.Frame(form, bg=BG)
         rf.grid(row=11, column=1, sticky="w", pady=5)
-        for v, t in [(False, "Read/Write"), (True, "Read-only (files on the server can't be changed)")]:
+        for v, t in [(False, "Read/Write"), (True, "Read-only")]:
             tk.Radiobutton(rf, text=t, variable=self.ro_var, value=v,
                            bg=BG, fg=FG, selectcolor=BG_INPUT,
                            activebackground=BG, activeforeground=FG,
@@ -878,7 +879,7 @@ class EditDialog(tk.Toplevel):
         Tooltip(apply, "Save, then connect the drive with the new settings\n"
                        "(a connected drive is disconnected and connected again)")
         mk_btn(bar, "Save", self._save, bg=ACCENT, fg="white").pack(side="right", padx=(6,0))
-        mk_btn(bar, "Cancel", self.destroy).pack(side="right")
+        mk_btn(bar, "Cancel", self.destroy).pack(side="right", padx=(24, 0))
 
         self._probe_password = None  # password typed for "Ask Each Time" tests
         self.protocol("WM_DELETE_WINDOW", self.destroy)
@@ -1552,7 +1553,8 @@ class SettingsDialog(tk.Toplevel):
         self.update_var = tk.BooleanVar(value=settings.get("check_updates", False))
         tk.Checkbutton(body, text="Check for updates when the app starts",
                        variable=self.update_var, **radio).pack(anchor="w", padx=(18, 0))
-        note("Asks GitHub once per start whether a newer version exists. On by default.")
+        note("Asks GitHub at start and once a day whether a newer version exists. "
+             "On by default.")
 
         section("Logging")
         self.log_var = tk.BooleanVar(value=settings["log_enabled"])
@@ -1658,6 +1660,14 @@ class App(tk.Tk):
         self._settings = load_settings()
         apply_theme(self._settings["theme"])
         self._at_login = STARTUP_ARG in sys.argv[1:]
+        # After an update: connect again the drives that were connected before it
+        self._reconnect_ids = set()
+        for a in sys.argv[1:]:
+            if a.startswith(RECONNECT_ARG):
+                self._reconnect_ids.update(x for x in a[len(RECONNECT_ARG):].split(",") if x)
+        self._update_wake = threading.Event()
+        self._update_info = None       # newest release found, if newer than this one
+        self._notified_version = None  # tray notification shown once per version
         if self._at_login and self._settings.get("start_minimized", True):
             self.withdraw()  # avoid a window flash before going to the tray
         if getattr(sys, "frozen", False):
@@ -1704,8 +1714,8 @@ class App(tk.Tk):
             self._auto_connect()
         self._poll()
         self._auto_start_tunnels()
-        if self._settings.get("check_updates"):
-            self._check_updates()
+        update.cleanup_old()
+        self._update_loop()
         self._listen_for_show()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         if self._at_login and self._settings.get("start_minimized", True):
@@ -1763,7 +1773,7 @@ class App(tk.Tk):
         # Missing-requirements banner (shown by check_requirements when needed)
         self._req_banner = tk.Frame(self, bg=BANNER_BG,
                                     highlightbackground=WARNING, highlightthickness=1)
-        # New-version banner (shown by _check_updates when needed)
+        # New-version banner (shown by _show_update when needed)
         self._update_banner = tk.Frame(self, bg=_blend(BG, ACCENT, 0.18),
                                        highlightbackground=ACCENT, highlightthickness=1)
 
@@ -2010,35 +2020,122 @@ class App(tk.Tk):
                 if t.get("auto_start"):
                     self.tunnels.start(conn, t, self.log)
 
-    def _check_updates(self):
-        def w():
-            found = latest_release()
-            if not found:
-                return self.log("[INFO] Update check: couldn't reach GitHub.\n")
-            version, url = found
-            if _version_tuple(version) > _version_tuple(APP_VERSION):
-                self.log(f"[INFO] Version {version} is available: {url}\n")
+    def _update_loop(self):
+        """Ask GitHub for a newer release shortly after start, then once a day.
+        If GitHub can't be reached, try again after 10 minutes."""
+        def check():
+            info = latest_release()
+            if not info:
+                self.log("[INFO] Update check: couldn't reach GitHub, trying again in 10 minutes.\n")
+                return 600
+            if _version_tuple(info["version"]) > _version_tuple(APP_VERSION):
+                self.log(f"[INFO] Version {info['version']} is available: {info['url']}\n")
                 for _ in range(20):  # the main loop may not be running yet
                     try:
-                        return self.after(0, self._show_update, version, url)
+                        self.after(0, self._show_update, info)
+                        break
                     except RuntimeError:
                         time.sleep(0.25)
             else:
                 self.log(f"[INFO] Update check: {APP_VERSION} is the latest version.\n")
-        threading.Thread(target=w, daemon=True).start()
+            return 24 * 3600
 
-    def _show_update(self, version, url):
+        def loop():
+            wait = 5
+            while True:
+                self._update_wake.wait(wait)
+                self._update_wake.clear()
+                if self._stop.is_set():
+                    return
+                # Turned off: sleep until Settings turns it back on (wakes us)
+                wait = check() if self._settings.get("check_updates") else None
+        threading.Thread(target=loop, daemon=True).start()
+
+    def _show_update(self, info):
         import webbrowser
+        new = self._update_info is None or info["version"] != self._update_info["version"]
+        self._update_info = info
+        if self._notified_version != info["version"]:
+            self._notified_version = info["version"]
+            self._notify(f"Version {info['version']} is available. "
+                         f"Open {APP_NAME} to update.")
         b = self._update_banner
+        if not new and not b.winfo_ismapped():
+            return  # dismissed: don't bring it back for the same version
         for w in b.winfo_children():
             w.destroy()
         bg = b.cget("bg")
-        tk.Label(b, text=f"Version {version} is available (you have {APP_VERSION}).",
-                 bg=bg, fg=FG, font=FONT_SMALL).pack(side="left", padx=(12, 8), pady=8)
-        mk_btn(b, "Dismiss", b.pack_forget).pack(side="right", padx=(4, 10), pady=8)
-        mk_btn(b, "Download", lambda: webbrowser.open(url), bg=ACCENT).pack(
-            side="right", padx=4, pady=8)
+        self._update_lbl = tk.Label(
+            b, text=f"Version {info['version']} is available (you have {APP_VERSION}).",
+            bg=bg, fg=FG, font=FONT_SMALL)
+        self._update_lbl.pack(side="left", padx=(12, 8), pady=8)
+        self._update_btns = []
+        btn = mk_btn(b, "Dismiss", b.pack_forget)
+        btn.pack(side="right", padx=(4, 10), pady=8)
+        self._update_btns.append(btn)
+        btn = mk_btn(b, "Release Notes", lambda: webbrowser.open(info["url"]))
+        btn.pack(side="right", padx=4, pady=8)
+        self._update_btns.append(btn)
+        if update.can_self_update() and info.get("exe") and info.get("sums"):
+            btn = mk_btn(b, "Update Now", lambda: self._update_now(info), bg=SUCCESS, fg="white")
+            btn.pack(side="right", padx=4, pady=8)
+            self._update_btns.append(btn)
         b.pack(fill="x", side="top", after=self._hdr)
+
+    def _update_now(self, info):
+        if not messagebox.askyesno("Update",
+                f"Update to version {info['version']}?\n\n"
+                "The new version is downloaded from GitHub and checked, then the app "
+                "restarts. Connected drives are disconnected and connected again after "
+                "the restart, so any copy still running on them will fail. Running "
+                "tunnels are stopped.", parent=self):
+            return
+        for btn in self._update_btns:
+            btn.configure(state="disabled")
+        self._update_lbl.configure(text=f"Downloading version {info['version']}...")
+        def progress(pct):
+            try: self.after(0, lambda: self._update_lbl.configure(
+                text=f"Downloading version {info['version']}... {pct}%"))
+            except RuntimeError: pass
+        def w():
+            try:
+                new = update.download(info, progress)
+            except Exception as e:
+                self.log(f"[ERROR] Update download failed: {e}\n")
+                try: self.after(0, self._update_failed, info, str(e))
+                except RuntimeError: pass
+                return
+            try: self.after(0, self._install_update, info, new)
+            except RuntimeError: pass
+        threading.Thread(target=w, daemon=True).start()
+
+    def _update_failed(self, info, err):
+        messagebox.showerror("Update",
+            f"The update couldn't be installed:\n{err}\n\n"
+            "You can download it from the release page instead.", parent=self)
+        self._update_info = None
+        self._show_update(info)
+
+    def _install_update(self, info, new):
+        try:
+            update.swap_in(new)
+        except OSError as e:
+            self.log(f"[ERROR] Couldn't replace the exe: {e}\n")
+            self._update_failed(info, f"Couldn't replace the exe ({e}).")
+            return
+        self.log(f"[INFO] Updated to {info['version']}, restarting...\n")
+        mounted = [c for c in self._connections if letter_present(c["drive_letter"])]
+        ids = [c["id"] for c in mounted]
+        def restart():
+            update.start_new(ids)
+            self._finish_close()
+        self.tunnels.stop_all()
+        self._stop.set()
+        self._update_wake.set()
+        if mounted:
+            ShutdownDialog(self, mounted, on_done=restart)
+        else:
+            restart()
 
     def export_connections(self, parent):
         path = filedialog.asksaveasfilename(
@@ -2148,7 +2245,8 @@ class App(tk.Tk):
         threading.Thread(target=w, daemon=True).start()
 
     def _auto_connect(self):
-        conns = [c for c in self._connections if c.get("auto_connect")]
+        conns = [c for c in self._connections
+                 if c.get("auto_connect") or c["id"] in self._reconnect_ids]
         if not conns:
             return
         def w():  # probing can wait on a slow drive, so not on the UI thread
@@ -2360,6 +2458,8 @@ class App(tk.Tk):
                                      parent=self)
         old, self._settings = self._settings, new
         save_settings(new)
+        if new.get("check_updates") and not old.get("check_updates"):
+            self._update_wake.set()  # check now instead of waiting
         setup_file_log(new["log_enabled"])
         if new["theme"] != old["theme"]:
             apply_theme(new["theme"])

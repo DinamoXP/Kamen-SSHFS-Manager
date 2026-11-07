@@ -10,6 +10,7 @@ import time
 
 from .config import (
     STARTUP_ARG,
+    UPDATED_ARG,
 )
 
 def letter_present(drive):
@@ -190,8 +191,15 @@ def claim_single_instance():
     """True if no other copy is running. Otherwise asks the running copy to
     show its window (unless this launch came from Windows startup)."""
     global _instance_mutex, _show_event
-    _instance_mutex = _k32.CreateMutexW(None, False, "Local\\KamenSSHFSManager")
-    if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+    # After an update the old copy is still closing: wait for it (up to 60 s)
+    tries = 120 if UPDATED_ARG in sys.argv[1:] else 1
+    for i in range(tries):
+        _instance_mutex = _k32.CreateMutexW(None, False, "Local\\KamenSSHFSManager")
+        if ctypes.get_last_error() != 183 or i == tries - 1:  # 183 = ERROR_ALREADY_EXISTS
+            break
+        _k32.CloseHandle(_instance_mutex)
+        time.sleep(0.5)
+    if ctypes.get_last_error() == 183:
         if STARTUP_ARG not in sys.argv[1:]:
             ev = _k32.OpenEventW(0x0002, False, "Local\\KamenSSHFSManagerShow")
             if ev:
