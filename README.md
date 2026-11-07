@@ -7,13 +7,13 @@ letters, open SSH tunnels to web panels and databases, browse through a SOCKS
 proxy, and open a terminal in one click. Built on SSHFS-Win, with saved
 connections, 2FA support and automatic reconnect.
 
-![Kamen SSHFS Manager main window with three connections, two of them mounted](images/main.jpg?v=4a73bdaf)
+![Kamen SSHFS Manager main window with three connections, two of them mounted](images/main.jpg?v=5ebda284)
 
 ## Screenshots
 
 | New connection | Settings |
 |:---:|:---:|
-| ![Connection details form with Test Connection and Browse](images/new_connection.jpg?v=af057df5) | ![Settings window with theme, startup, connections, drive, update and logging options](images/settings.jpg?v=17fb97c0) |
+| ![Connection details form with Test Connection and Browse](images/new_connection.jpg?v=11858336) | ![Settings window with theme, startup, connections, drive, update and logging options](images/settings.jpg?v=ad72867e) |
 
 ## Features
 
@@ -54,7 +54,8 @@ connections, 2FA support and automatic reconnect.
 - Live status polling (every 5 s) that can't freeze the app, with
   **Restart** / **Kill** for a drive that stops responding
 - Automatic reconnect when the network drops; one copy of the app at a time
-- Hover over the version in the bottom bar to see the build date and time
+- The version is shown in the title bar and next to the app name; hover over
+  it to see the build date and time
 
 ## Requirements
 
@@ -99,6 +100,7 @@ Open with the **⚙ Settings** button. Defaults are shown in bold.
 | Restart a drive that stops responding | **On** / Off (after 60 s; interrupts any copy still running on that drive) |
 | Enable debug log        | **On** / Off (also written to `kamen.log`)          |
 | Check for updates when the app starts | **On** / Off (at start and once a day; see [Updates](#updates)) |
+| Check for Updates (button) | Asks GitHub right now, even with the setting above off |
 | Connections             | **Export...** / **Import...** a `.json` file of your connections (no passwords) |
 
 Imported connections get new ids, and if a drive letter is already used the
@@ -111,6 +113,9 @@ With **Check for updates when the app starts** on (the default), the app asks
 GitHub for the newest release a few seconds after it starts and then once a
 day while it runs. If GitHub can't be reached, it tries again after 10
 minutes.
+
+To check right away, click **Check for Updates** in Settings (this works
+even with the daily check turned off).
 
 When a newer version is out, a tray notification and a banner at the top of
 the window say so. The banner has:

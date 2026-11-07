@@ -1566,6 +1566,14 @@ class SettingsDialog(tk.Toplevel):
                        variable=self.update_var, **radio).pack(anchor="w", padx=(18, 0))
         note("Asks GitHub at start and once a day whether a newer version exists. "
              "On by default.")
+        row = tk.Frame(body, bg=BG)
+        row.pack(anchor="w", padx=(18, 0), pady=(6, 0))
+        self.btn_check = mk_btn(row, "Check for Updates", lambda: self._check_now(parent))
+        self.btn_check.configure(disabledforeground=FG_MUTED)
+        self.btn_check.pack(side="left")
+        self.lbl_check = mk_label(row, f"You have version {APP_VERSION}.", fg=FG_MUTED,
+                                  font=FONT_SMALL)
+        self.lbl_check.pack(side="left", padx=(10, 0))
 
         section("Logging")
         self.log_var = tk.BooleanVar(value=settings["log_enabled"])
@@ -1590,6 +1598,22 @@ class SettingsDialog(tk.Toplevel):
                              check_updates=self.update_var.get())
         self.destroy()
         self.on_save(self.settings)
+
+    def _check_now(self, app):
+        self.btn_check.configure(state="disabled")
+        self.lbl_check.configure(text="Checking...", fg=FG_MUTED)
+        def done(info):
+            if not self.winfo_exists():
+                return
+            self.btn_check.configure(state="normal")
+            if not info:
+                self.lbl_check.configure(text="Couldn't reach GitHub.", fg=DANGER)
+            elif _version_tuple(info["version"]) > _version_tuple(APP_VERSION):
+                self.lbl_check.configure(text=f"Version {info['version']} is available.",
+                                         fg=SUCCESS)
+            else:
+                self.lbl_check.configure(text="You're up to date.", fg=SUCCESS)
+        app.check_updates_now(done)
 
 class UpdateDialog(tk.Toplevel):
     """Asks before Update Now: what happens, and whether to keep the old exe.
@@ -1741,7 +1765,7 @@ class App(tk.Tk):
             if reg and reg != _startup_command():
                 try: set_start_with_windows(True)
                 except OSError: pass
-        self.title(APP_NAME)
+        self.title(f"{APP_NAME} v{APP_VERSION}")
         self.geometry("700x540")
         self.minsize(600,400)
         self.configure(bg=BG)
@@ -1819,6 +1843,9 @@ class App(tk.Tk):
                 mk_label(hdr, APP_NAME, font=FONT_LARGE).pack(side="left", padx=18)
         else:
             mk_label(hdr, APP_NAME, font=FONT_LARGE).pack(side="left", padx=18)
+        hver = mk_label(hdr, f"v{APP_VERSION}", fg=FG_MUTED, font=FONT_SMALL)
+        hver.pack(side="left", padx=(8, 0), pady=(6, 0))
+        Tooltip(hver, build_info())
         mk_btn(hdr,"⚙ Settings", self._open_settings, bg=ACCENT).pack(side="right",padx=(4,12),pady=10)
         mk_btn(hdr,"🔌 Disconnect All", self._disconnect_all, bg=DANGER).pack(side="right",padx=4,pady=10)
         mk_btn(hdr,"+ Add Connection",  self._add, bg=SUCCESS).pack(side="right",padx=4,pady=10)
@@ -1849,18 +1876,15 @@ class App(tk.Tk):
             "No connections yet.\nClick '+ Add Connection' to get started.",
             fg=FG_MUTED)
 
-        # Single bottom bar: [Debug Log] [Clear Log] ........ [version] [Tray] [Exit]
+        # Single bottom bar: [Debug Log] [Clear Log] ........ [Tray] [Exit]
         bar = tk.Frame(self, bg=BG_HEAD, height=42)
         bar.pack(fill="x", side="bottom")
         bar.pack_propagate(False)
 
-        # Right side: Exit, then Minimize to Tray, then version (packed right->left)
+        # Right side: Exit, then Minimize to Tray (packed right->left)
         mk_btn(bar, "Exit", self._on_close, bg=EXIT_BG).pack(side="right", padx=(4, 12), pady=6)
         mk_btn(bar, "Minimize to Tray", self._minimize_to_tray,
                bg=TRAY_BG).pack(side="right", padx=4, pady=6)
-        ver = mk_label(bar, f"v{APP_VERSION}", fg=FG_MUTED, font=FONT_SMALL)
-        ver.pack(side="right", padx=(12, 8))
-        Tooltip(ver, build_info())
 
         # Left side: Debug Log, Clear Log
         self._log_btn = tk.Button(bar, text="▶  Debug Log", bg=BG_HEAD, fg=FG_MUTED,
@@ -2104,6 +2128,26 @@ class App(tk.Tk):
                 # Turned off: sleep until Settings turns it back on (wakes us)
                 wait = check() if self._settings.get("check_updates") else None
         threading.Thread(target=loop, daemon=True).start()
+
+    def check_updates_now(self, done):
+        """Settings > Check for Updates: ask GitHub now, even if the daily check
+        is off. done(info or None) runs on the UI thread; a newer version also
+        brings the banner back, even if it was dismissed."""
+        def w():
+            info = latest_release()
+            def ui():
+                if info and _version_tuple(info["version"]) > _version_tuple(APP_VERSION):
+                    self.log(f"[INFO] Version {info['version']} is available: {info['url']}\n")
+                    self._update_info = None
+                    self._show_update(info)
+                elif info:
+                    self.log(f"[INFO] Update check: {APP_VERSION} is the latest version.\n")
+                else:
+                    self.log("[INFO] Update check: couldn't reach GitHub.\n")
+                done(info)
+            try: self.after(0, ui)
+            except RuntimeError: pass
+        threading.Thread(target=w, daemon=True).start()
 
     def _show_update(self, info):
         import webbrowser
