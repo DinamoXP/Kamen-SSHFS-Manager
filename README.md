@@ -7,13 +7,13 @@ letters, open SSH tunnels to web panels and databases, browse through a SOCKS
 proxy, and open a terminal in one click. Built on SSHFS-Win, with saved
 connections, 2FA support and automatic reconnect.
 
-![Kamen SSHFS Manager main window with three connections, two of them mounted](images/main.jpg?v=0fad7066)
+![Kamen SSHFS Manager main window with three connections, two of them mounted](images/main.jpg?v=e18901a8)
 
 ## Screenshots
 
 | New connection | Settings |
 |:---:|:---:|
-| ![Connection details form with Test Connection and Browse](images/new_connection.jpg?v=9899bd96) | ![Settings window with theme, startup, connections, drive, update and logging options](images/settings.jpg?v=4d7f1d75) |
+| ![Connection details form with Test Connection and Browse](images/new_connection.jpg?v=efe1babb) | ![Settings window with theme, startup, connections, drive, update and logging options](images/settings.jpg?v=4d7f1d75) |
 
 ## Features
 
@@ -23,7 +23,10 @@ connections, 2FA support and automatic reconnect.
 - Three auth methods: Password, Private Key, Ask Each Time
 - **Key login...** sets up a login key on the server for you, so no password
   is needed after that (see [Key Login](#key-login))
-- Read-only mounts: the server's files can be opened and copied, not changed
+- Read/Write (default) or Read-only access per drive: a read-only drive's files
+  can be opened and copied, not changed
+- **Apply & Save** in the Edit window saves and reconnects the drive right
+  away, so changes take effect without disconnecting by hand
 - Interactive login (2FA codes) and a **Trust this server?** prompt for new host keys
 - Passwords encrypted with Windows DPAPI (readable only by your Windows account)
 - **Test Connection** and a remote folder browser for picking the remote path
@@ -139,7 +142,8 @@ password. The app:
 
 ### Read-only Mounts
 
-Tick **Read-only (files on the server can't be changed)** in the Edit window.
+Set **Access** to **Read-only** in the New or Edit Connection window
+(**Read/Write** is the default).
 Files can be opened and copied off the drive, but not changed, created or
 deleted. The server's SFTP program is started in read-only mode, so this
 needs OpenSSH's `sftp-server` in one of the usual places

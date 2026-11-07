@@ -829,24 +829,28 @@ class EditDialog(tk.Toplevel):
         self.e_extra = entry(10)
         self.e_extra.insert(0, self.conn.get("extra_args",""))
 
+        # Read/write (default) or read-only
+        lbl("Access", 11)
+        self.ro_var = tk.BooleanVar(value=self.conn.get("read_only", False))
+        rf = tk.Frame(form, bg=BG)
+        rf.grid(row=11, column=1, sticky="w", pady=5)
+        for v, t in [(False, "Read/Write"), (True, "Read-only (files on the server can't be changed)")]:
+            tk.Radiobutton(rf, text=t, variable=self.ro_var, value=v,
+                           bg=BG, fg=FG, selectcolor=BG_INPUT,
+                           activebackground=BG, activeforeground=FG,
+                           font=FONT).pack(side="left", padx=5)
+
         # Auto connect
         self.auto_var = tk.BooleanVar(value=self.conn.get("auto_connect", False))
         tk.Checkbutton(form, text="Connect automatically when the app starts", variable=self.auto_var,
                        bg=BG, fg=FG, selectcolor=BG_INPUT,
                        activebackground=BG, activeforeground=FG,
-                       font=FONT).grid(row=11, column=1, sticky="w", pady=(8, 0))
+                       font=FONT).grid(row=12, column=1, sticky="w", pady=(8, 0))
 
         # Verify host key
         self.verify_var = tk.BooleanVar(value=self.conn.get("verify_host_key", False))
         tk.Checkbutton(form, text="Verify SSH host key (recommended)",
                        variable=self.verify_var,
-                       bg=BG, fg=FG, selectcolor=BG_INPUT,
-                       activebackground=BG, activeforeground=FG,
-                       font=FONT).grid(row=12, column=1, sticky="w")
-
-        self.ro_var = tk.BooleanVar(value=self.conn.get("read_only", False))
-        tk.Checkbutton(form, text="Read-only (files on the server can't be changed)",
-                       variable=self.ro_var,
                        bg=BG, fg=FG, selectcolor=BG_INPUT,
                        activebackground=BG, activeforeground=FG,
                        font=FONT).grid(row=13, column=1, sticky="w", pady=(0, 8))
@@ -869,6 +873,10 @@ class EditDialog(tk.Toplevel):
         self.btn_key.pack(side="left", padx=(6, 0))
         Tooltip(self.btn_key, "Create an SSH key, install it on the server and\n"
                               "switch this connection to it (no stored password)")
+        apply = mk_btn(bar, "Apply & Save", lambda: self._save(apply=True), bg=SUCCESS, fg="white")
+        apply.pack(side="right", padx=(6, 0))
+        Tooltip(apply, "Save, then connect the drive with the new settings\n"
+                       "(a connected drive is disconnected and connected again)")
         mk_btn(bar, "Save", self._save, bg=ACCENT, fg="white").pack(side="right", padx=(6,0))
         mk_btn(bar, "Cancel", self.destroy).pack(side="right")
 
@@ -1036,7 +1044,7 @@ class EditDialog(tk.Toplevel):
             self, "_probe_home", ".")
         RemoteBrowser(self, c, pw, start, on_pick)
 
-    def _save(self):
+    def _save(self, apply=False):
         self.conn.update({
             "name":            self.e_name.get().strip() or "Unnamed",
             "host":            self.e_host.get().strip(),
@@ -1056,7 +1064,7 @@ class EditDialog(tk.Toplevel):
             messagebox.showerror("Validation","Host is required.", parent=self); return
         if not self.conn["user"]:
             messagebox.showerror("Validation","Username is required.", parent=self); return
-        self.on_save(self.conn)
+        self.on_save(self.conn, apply)
         self.destroy()
 
 class RemoteBrowser(tk.Toplevel):
@@ -1932,7 +1940,8 @@ class App(tk.Tk):
         self.open_edit_dialog(new_connection(), is_new=True)
 
     def open_edit_dialog(self, conn, is_new=False):
-        def on_save(updated):
+        def on_save(updated, apply=False):
+            old = None if is_new else dict(self.find_conn(updated["id"]) or {}) or None
             if is_new:
                 self._connections.append(updated)
             else:
@@ -1941,7 +1950,33 @@ class App(tk.Tk):
                         self._connections[i] = updated; break
             save_connections(self._connections)
             self._render()
+            if apply:
+                self.apply_connection(old, updated)
         EditDialog(self, conn, on_save, is_new=is_new)
+
+    def apply_connection(self, old, new):
+        """Apply & Save: unmount the drive as it was saved before (if it is
+        mounted), then mount it with the new settings."""
+        cid = new["id"]
+        card = self._cards.get(cid)
+        if not card:
+            return
+        if not (old and letter_present(old["drive_letter"])):
+            card._connect()
+            return
+        card._set("stopping")
+        self.log(f"[INFO] Applying changes to {new['name']}: reconnecting...\n")
+        def w():
+            disconnect(old, log=self.log)
+            self._drive_state[old["drive_letter"]] = "unmounted"
+            def reconnect():
+                c = self._cards.get(cid)
+                if c and c.winfo_exists():
+                    c._set("disconnected")
+                    c._connect()
+            try: self.after(0, reconnect)
+            except RuntimeError: pass
+        threading.Thread(target=w, daemon=True).start()
 
     def find_conn(self, cid):
         return next((c for c in self._connections if c["id"] == cid), None)
