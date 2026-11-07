@@ -92,6 +92,13 @@ class MountOptions(unittest.TestCase):
         self.assertTrue(mounts.mount_option(conn, "compression"))
 
 
+class ShareName(unittest.TestCase):
+    def test_share_name(self):
+        self.assertEqual(mounts._share_name("Web Server", "W:"), "Web Server")
+        self.assertEqual(mounts._share_name('a/b:c*"d', "W:"), "abcd")
+        self.assertEqual(mounts._share_name("  ...  ", "K:"), "K")
+
+
 class Helpers(unittest.TestCase):
     def test_io_total(self):
         import os

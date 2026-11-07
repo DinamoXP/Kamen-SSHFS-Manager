@@ -342,6 +342,7 @@ another machine the server can reach (e.g. a NAS on the server's network).
 |------------------------------------------------|-------------------------------------------------|
 | `<path>: No such file or directory`            | Remote path doesn't exist - Edit → Test Connection → Browse… |
 | `read: Connection reset by peer`               | ssh quit before mounting - run Test Connection for the real reason (password, host key, network) |
+| An AI tool or editor says the drive's folder can't be reached, though Explorer opens it | Drives mounted before v1.9.1 lack the network-share registration some tools need: click **Disconnect All**, then connect again |
 | `sshfs.exe not found`                          | Install WinFsp, then SSHFS-Win                  |
 | `[HUNG] X: not responding since ...`           | The drive's sshfs stopped answering. Click **Restart** on its card, or **Kill** to remove the drive |
 | Banner: WinFsp / SSHFS-Win not installed       | Use the Get… buttons, install, then click Re-check |

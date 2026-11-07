@@ -162,6 +162,12 @@ MOUNT_OPTIONS = [
      "(some programs save that way)"),
 ]
 
+def _share_name(name, drive):
+    """Connection name as a share name: without characters a UNC path can't
+    hold; the drive letter if nothing is left."""
+    share = "".join(ch for ch in name if ch not in '\\/:*?"<>|%' and ord(ch) >= 32).strip(" .")
+    return share or drive[0].upper()
+
 def mount_option(conn, key):
     default = next(o[2] for o in MOUNT_OPTIONS if o[0] == key)
     return bool(conn.get("mount_options", {}).get(key, default))
@@ -205,6 +211,12 @@ def connect(conn, log=None):
         "-oumask=000",
         "-ocreate_umask=000",
         "-oallow_other",
+        # Register the drive like a network share (\\kamen\<name>). Without it
+        # Windows can't give programs the drive's "final path"
+        # (GetFinalPathNameByHandle), and tools that check their folder that way
+        # (Node's realpath.native, Claude Code) treat the whole drive as
+        # unreachable. Explorer shows the share name, so use the connection's.
+        f"-oVolumePrefix=/kamen/{_share_name(name, drive)}",
         # Notice a dead link within ~45 s and reconnect instead of hanging
         "-oServerAliveInterval=15",
         "-oServerAliveCountMax=3",
