@@ -7,7 +7,51 @@ letters, open SSH tunnels to web panels and databases, browse through a SOCKS
 proxy, and open a terminal in one click. Built on SSHFS-Win, with saved
 connections, 2FA support and automatic reconnect.
 
+**[Download the latest version](https://github.com/DinamoXP/Kamen-SSHFS-Manager/releases/latest/download/Kamen.SSHFS.Manager.exe)** (Windows 10/11, 64-bit) and see
+[Install](#install).
+
 ![Kamen SSHFS Manager main window with three connections, two of them mounted](images/main.jpg?v=8a681a97)
+
+## Install
+
+1. Install **WinFsp**, then **SSHFS-Win** (in this order):
+   - WinFsp: https://github.com/winfsp/winfsp/releases
+   - SSHFS-Win: https://github.com/winfsp/sshfs-win/releases
+2. Download **[Kamen.SSHFS.Manager.exe](https://github.com/DinamoXP/Kamen-SSHFS-Manager/releases/latest/download/Kamen.SSHFS.Manager.exe)** from the
+   [latest release](https://github.com/DinamoXP/Kamen-SSHFS-Manager/releases/latest).
+3. Put it in a folder of your own, e.g. `Documents\Kamen SSHFS Manager`. Use
+   a folder you can write to (not `Program Files`), so **Update Now** can
+   replace it later.
+4. Start it. The first time, Windows SmartScreen may say "Windows protected
+   your PC" because the app isn't code-signed yet: click **More info**, then
+   **Run anyway** (see [Code Signing](#code-signing)).
+
+There's no installer: the exe is the whole app. It starts with Windows from
+then on (you can turn that off in Settings). If WinFsp or SSHFS-Win is
+missing, the app shows a banner with download links.
+
+The **SSH** button uses Windows' built-in OpenSSH Client (Settings, Apps,
+Optional features), which is installed by default on current Windows 10/11.
+
+## Updating
+
+**Version 1.7.4 or newer:** the app finds new versions by itself (at start and
+once a day) and shows a banner. Click **Update Now**: it downloads the new
+version, checks it and restarts. To look right away, use **Settings > Check
+for Updates**. Details in [Updates](#updates).
+
+**Older versions** can't update themselves, so update once by hand:
+
+1. Exit the app (**Exit**, then **Yes** to disconnect).
+2. Download **[Kamen.SSHFS.Manager.exe](https://github.com/DinamoXP/Kamen-SSHFS-Manager/releases/latest/download/Kamen.SSHFS.Manager.exe)** and replace your old exe
+   with it: same folder, same file name, so **Start with Windows** still
+   finds it. (Older downloads may be named `Kamen SSHFS Manager.exe`; keep
+   whichever name you had, or turn Start with Windows off and on again in
+   Settings after renaming.)
+3. Start it. Your connections and settings are kept (they're stored in
+   `%APPDATA%\kamen-sshfs-manager`, not next to the exe).
+
+From then on, updates come through **Update Now**.
 
 ## Screenshots
 
@@ -63,36 +107,15 @@ connections, 2FA support and automatic reconnect.
 - The version is shown in the title bar and next to the app name; hover over
   it to see the build date and time
 
-## Requirements
-
-### 1. WinFsp + SSHFS-Win
-
-Install these first, in this order:
-
-1. WinFsp: https://github.com/winfsp/winfsp/releases
-2. SSHFS-Win: https://github.com/winfsp/sshfs-win/releases
-
-SSHFS-Win installs `sshfs.exe` to `C:\Program Files\SSHFS-Win\bin\sshfs.exe`.
-The app checks for both on startup and shows a warning banner with download
-links if either is missing.
-
-The **SSH** button uses Windows' built-in OpenSSH Client
-(Settings → Apps → Optional features), which is installed by default on
-current Windows 10/11.
-
-### 2. Python dependencies
+## Running from Source
 
 ```
 pip install -r requirements.txt
-```
-
-Python 3.9+ required (release builds use 3.11).
-
-## Usage
-
-```
 python kamen_sshfs_manager.py
 ```
+
+Python 3.9+ required (release builds use 3.11). WinFsp and SSHFS-Win are
+needed as above.
 
 ## Settings
 
