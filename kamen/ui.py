@@ -2256,13 +2256,17 @@ class App(tk.Tk):
         btn = mk_btn(b, "Dismiss", b.pack_forget)
         btn.pack(side="right", padx=(4, 10), pady=8)
         self._update_btns.append(btn)
-        btn = mk_btn(b, "Release Notes", lambda: webbrowser.open(info["url"]))
-        btn.pack(side="right", padx=4, pady=8)
-        self._update_btns.append(btn)
         if update.can_self_update() and info.get("exe") and info.get("sums"):
-            btn = mk_btn(b, "Update Now", lambda: self._update_now(info), bg=SUCCESS, fg="white")
+            btn = mk_btn(b, "Release Notes", lambda: webbrowser.open(info["url"]))
             btn.pack(side="right", padx=4, pady=8)
             self._update_btns.append(btn)
+            btn = mk_btn(b, "Update Now", lambda: self._update_now(info), bg=SUCCESS, fg="white")
+        else:
+            # Can't update in place (running from source, or the release has no
+            # checksum to verify against): send them to the release page
+            btn = mk_btn(b, "Download", lambda: webbrowser.open(info["url"]), bg=ACCENT, fg="white")
+        btn.pack(side="right", padx=4, pady=8)
+        self._update_btns.append(btn)
         b.pack(fill="x", side="top", after=self._hdr)
 
     def _update_now(self, info):

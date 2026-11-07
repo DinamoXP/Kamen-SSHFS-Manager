@@ -10,7 +10,7 @@ connections, 2FA support and automatic reconnect.
 **[Download the latest version](https://github.com/DinamoXP/Kamen-SSHFS-Manager/releases/latest/download/Kamen.SSHFS.Manager.exe)** (Windows 10/11, 64-bit) and see
 [Install](#install).
 
-![Kamen SSHFS Manager main window with three connections, two of them mounted](images/main.jpg?v=8a681a97)
+![Kamen SSHFS Manager main window with three connections, two of them mounted](images/main.jpg?v=09d9fdbb)
 
 ## Install
 
@@ -57,7 +57,7 @@ From then on, updates come through **Update Now**.
 
 | New connection | Settings |
 |:---:|:---:|
-| ![Connection details form with Test Connection and Browse](images/new_connection.jpg?v=516857a0) | ![Settings window with theme, startup, connections, drive, update and logging options](images/settings.jpg?v=cebc69a4) |
+| ![Connection details form with Test Connection and Browse](images/new_connection.jpg?v=516857a0) | ![Settings window with theme, startup, connections, drive, update and logging options](images/settings.jpg?v=3a637c8c) |
 
 ## Features
 
@@ -161,6 +161,9 @@ the window say so. The banner has:
     backup is already there; older backups are never touched). To use it
     again, rename it back to `.exe`.
 - **Release Notes**: opens the release page in your browser.
+- **Download** (instead of the two above): shown when the app can't update
+  itself, e.g. when run from source or when a release has no checksum file.
+  Opens the release page to download it by hand.
 - **Dismiss**: hides the banner until the next version.
 
 Update Now is only offered for the exe (not when running from source). If the
