@@ -90,7 +90,8 @@ def _askpass_main(prompt):
     """Answer one ssh prompt (ssh runs this app as SSH_ASKPASS):
     - host-key "(yes/no)?" questions -> Trust / Cancel popup
     - password prompts -> the saved password (once per ssh process)
-    - anything else (2FA codes, passphrases, Ask Each Time) -> input popup
+    - key passphrase prompts -> the saved passphrase (once per ssh process)
+    - anything else (2FA codes, Ask Each Time) -> input popup
     Cancel exits 1, which ssh treats as no answer."""
     cid = os.environ.get(ASKPASS_ENV, "")
     conn = next((c for c in load_connections() if c.get("id") == cid), {}) or {}
@@ -102,6 +103,13 @@ def _askpass_main(prompt):
     elif ("password" in low and conn.get("auth_type") == "password"
           and conn.get("password") and not _saved_password_already_tried()):
         return _write_stdout(conn["password"])
+    elif ("passphrase for key" in low and conn.get("auth_type") == "key"
+          and conn.get("passphrase") and conn.get("key_path")
+          and os.path.basename(conn["key_path"].replace("\\", "/")).lower() in low
+          and not _saved_password_already_tried()):
+        # Only respond to OpenSSH prompts naming the configured private key.
+        # Never send a stored passphrase to an arbitrary server/2FA prompt.
+        return _write_stdout(conn["passphrase"])
     else:
         kind = "secret" if any(w in low for w in ("password", "passphrase", "pin")) else "text"
     apply_theme(load_settings()["theme"])
@@ -847,6 +855,23 @@ class EditDialog(tk.Toplevel):
         mk_btn(kf, "Browse", self._browse, width=7).grid(row=0, column=1, padx=(6,0))
         self._kf = kf
 
+        # A private key may be encrypted. Remembering the passphrase is optional.
+        pp = tk.Frame(kf, bg=BG)
+        pp.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        mk_label(pp, "Passphrase", fg=FG_MUTED, font=FONT_SMALL).pack(side="left")
+        self.e_passphrase = mk_entry(pp, width=15, show="●")
+        self.e_passphrase.pack(side="left", padx=(6, 8))
+        self.e_passphrase.insert(0, self.conn.get("passphrase", ""))
+        self.remember_passphrase_var = tk.BooleanVar(
+            value=bool(self.conn.get("passphrase")))
+        remember_cb = tk.Checkbutton(
+            pp, text="Remember passphrase", variable=self.remember_passphrase_var,
+            bg=BG, fg=FG, selectcolor=BG_INPUT,
+            activebackground=BG, activeforeground=FG, font=FONT_SMALL)
+        remember_cb.pack(side="left")
+        Tooltip(remember_cb, "Stored encrypted with Windows DPAPI for this Windows user.\n"
+                             "Leave unchecked to use the passphrase only for this test.")
+
         # Extra args
         lbl("Extra Args", 10)
         self.e_extra = entry(10)
@@ -884,13 +909,29 @@ class EditDialog(tk.Toplevel):
                                 activebackground=BG, activeforeground=FG, font=FONT)
             cb.grid(row=i // 3, column=i % 3, sticky="w", padx=(0, 10))
             Tooltip(cb, tip)
+            if key == "use_sudo":
+                cb.configure(command=self._sudo_change)
+
+        # Separate sudo password (not the SSH password or key passphrase).
+        self.lbl_sudo_password = mk_label(
+            form, "Sudo Password", fg=FG_MUTED, font=FONT_SMALL)
+        self.lbl_sudo_password.grid(row=15, column=0, sticky="e",
+                                    padx=(14, 8), pady=5)
+        self.e_sudo_password = mk_entry(form, show="●")
+        self.e_sudo_password.grid(row=15, column=1, sticky="ew",
+                                  padx=(0, 14), pady=5)
+        self.e_sudo_password.insert(0, self.conn.get("sudo_password", ""))
+        Tooltip(self.e_sudo_password,
+                "Required only when sudo asks for a password. Saved with Windows DPAPI. "
+                "Leave blank if sudo -n already works.")
+        self._sudo_change()
 
         # Auto connect
         self.auto_var = tk.BooleanVar(value=self.conn.get("auto_connect", False))
         tk.Checkbutton(form, text="Connect automatically when the app starts", variable=self.auto_var,
                        bg=BG, fg=FG, selectcolor=BG_INPUT,
                        activebackground=BG, activeforeground=FG,
-                       font=FONT).grid(row=15, column=1, sticky="w", pady=(8, 0))
+                       font=FONT).grid(row=16, column=1, sticky="w", pady=(8, 0))
 
         # Verify host key
         self.verify_var = tk.BooleanVar(value=self.conn.get("verify_host_key", False))
@@ -898,7 +939,7 @@ class EditDialog(tk.Toplevel):
                        variable=self.verify_var,
                        bg=BG, fg=FG, selectcolor=BG_INPUT,
                        activebackground=BG, activeforeground=FG,
-                       font=FONT).grid(row=16, column=1, sticky="w", pady=(0, 8))
+                       font=FONT).grid(row=17, column=1, sticky="w", pady=(0, 8))
 
         self._auth_change()
 
@@ -927,6 +968,14 @@ class EditDialog(tk.Toplevel):
 
         self._probe_password = None  # password typed for "Ask Each Time" tests
         self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+    def _sudo_change(self):
+        if self.opt_vars["use_sudo"].get():
+            self.lbl_sudo_password.grid()
+            self.e_sudo_password.grid()
+        else:
+            self.lbl_sudo_password.grid_remove()
+            self.e_sudo_password.grid_remove()
 
     def _auth_change(self):
         auth = self.auth_var.get()
@@ -960,6 +1009,7 @@ class EditDialog(tk.Toplevel):
             "remote_path": self.e_remote.get().strip() or "/",
             "auth_type": self.auth_var.get(), "password": self.e_pass.get(),
             "key_path": self.e_key.get().strip(),
+            "passphrase": self.e_passphrase.get() if self.auth_var.get() == "key" else "",
             "verify_host_key": self.verify_var.get(),
             "jump_host": self.e_jump.get().strip(),
         })
@@ -1101,6 +1151,10 @@ class EditDialog(tk.Toplevel):
             "auth_type":       self.auth_var.get(),
             "password":        self.e_pass.get(),
             "key_path":        self.e_key.get().strip(),
+            "passphrase":      (self.e_passphrase.get() if self.auth_var.get() == "key"
+                                and self.remember_passphrase_var.get() else ""),
+            "sudo_password":   (self.e_sudo_password.get()
+                                if self.opt_vars["use_sudo"].get() else ""),
             "extra_args":      self.e_extra.get().strip(),
             "auto_connect":    self.auto_var.get(),
             "verify_host_key": self.verify_var.get(),
@@ -2327,7 +2381,8 @@ class App(tk.Tk):
             initialfile="kamen-connections.json", filetypes=[("JSON files", "*.json")])
         if not path:
             return
-        conns = [{k: v for k, v in c.items() if k != "password"} for c in self._connections]
+        conns = [{k: v for k, v in c.items() if k not in ("password", "passphrase", "sudo_password")}
+                 for c in self._connections]
         data = {"app": APP_NAME, "version": APP_VERSION, "connections": conns}
         try:
             with open(path, "w", encoding="utf-8") as f:
@@ -2337,7 +2392,7 @@ class App(tk.Tk):
             return
         self.log(f"[INFO] Exported {len(conns)} connection(s) to {path}\n")
         messagebox.showinfo("Export", f"Exported {len(conns)} connection(s).\n\n"
-                            "Passwords are not included.", parent=parent)
+                            "Passwords, sudo passwords and key passphrases are not included.", parent=parent)
 
     def import_connections(self, parent):
         import copy, string
@@ -2362,6 +2417,8 @@ class App(tk.Tk):
         for i, raw in enumerate(items):
             c = dict(new_connection(), **copy.deepcopy(raw))
             c["password"] = ""
+            c["passphrase"] = ""
+            c["sudo_password"] = ""
             if c["id"] in ids:
                 c["id"] = str(base + i)
             for j, t in enumerate(c.get("tunnels", [])):
