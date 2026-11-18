@@ -245,7 +245,7 @@ def load_connections():
     except Exception:
         return []
     for c in conns:
-        for secret in ("password", "passphrase"):
+        for secret in ("password", "passphrase", "sudo_password"):
             try:
                 c[secret] = _dpapi_decrypt(c.get(secret, ""))
             except Exception:
@@ -256,7 +256,7 @@ def save_connections(conns):
     encrypted = []
     for c in conns:
         copy = dict(c)
-        for secret in ("password", "passphrase"):
+        for secret in ("password", "passphrase", "sudo_password"):
             try:
                 copy[secret] = _dpapi_encrypt(c.get(secret, ""))
             except Exception:
@@ -269,5 +269,5 @@ def new_connection():
     return {"id": str(int(time.time()*1000)), "name": "New Connection",
             "host": "", "port": 22, "user": "", "remote_path": "/",
             "drive_letter": "Z:", "auth_type": "password",
-            "password": "", "passphrase": "", "key_path": "", "extra_args": "",
+            "password": "", "passphrase": "", "sudo_password": "", "key_path": "", "extra_args": "",
             "auto_connect": False, "verify_host_key": False}

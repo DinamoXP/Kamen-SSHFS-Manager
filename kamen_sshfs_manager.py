@@ -8,7 +8,7 @@ The code lives in the kamen/ package; this file only starts the app.
 import os
 import sys
 
-from kamen.ssh import ASKPASS_ENV, JUMP_ENV
+from kamen.ssh import ASKPASS_ENV, JUMP_ENV, SUDO_ENV
 
 if __name__ == "__main__":
     # Launched by ssh as SSH_ASKPASS (see kamen/ssh.py): answer and exit before
@@ -16,6 +16,10 @@ if __name__ == "__main__":
     # helper is this same exe running while the app is open.
     # Launched by SSHFS-Win's ssh as the "shell" for a jump host (see
     # jump_shell_main): start the jump hop and exit.
+    if (os.environ.get(SUDO_ENV) and len(sys.argv) >= 2
+            and sys.argv[1] == "--sudo-ssh-wrapper"):
+        from kamen.ssh import sudo_ssh_wrapper_main
+        sys.exit(sudo_ssh_wrapper_main(sys.argv[2:]))
     if os.environ.get(JUMP_ENV) and len(sys.argv) == 3 and sys.argv[1] == "-c":
         from kamen.ssh import jump_shell_main
         sys.exit(jump_shell_main(sys.argv[2]))

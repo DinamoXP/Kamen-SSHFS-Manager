@@ -909,13 +909,29 @@ class EditDialog(tk.Toplevel):
                                 activebackground=BG, activeforeground=FG, font=FONT)
             cb.grid(row=i // 3, column=i % 3, sticky="w", padx=(0, 10))
             Tooltip(cb, tip)
+            if key == "use_sudo":
+                cb.configure(command=self._sudo_change)
+
+        # Separate sudo password (not the SSH password or key passphrase).
+        self.lbl_sudo_password = mk_label(
+            form, "Sudo Password", fg=FG_MUTED, font=FONT_SMALL)
+        self.lbl_sudo_password.grid(row=15, column=0, sticky="e",
+                                    padx=(14, 8), pady=5)
+        self.e_sudo_password = mk_entry(form, show="●")
+        self.e_sudo_password.grid(row=15, column=1, sticky="ew",
+                                  padx=(0, 14), pady=5)
+        self.e_sudo_password.insert(0, self.conn.get("sudo_password", ""))
+        Tooltip(self.e_sudo_password,
+                "Required only when sudo asks for a password. Saved with Windows DPAPI. "
+                "Leave blank if sudo -n already works.")
+        self._sudo_change()
 
         # Auto connect
         self.auto_var = tk.BooleanVar(value=self.conn.get("auto_connect", False))
         tk.Checkbutton(form, text="Connect automatically when the app starts", variable=self.auto_var,
                        bg=BG, fg=FG, selectcolor=BG_INPUT,
                        activebackground=BG, activeforeground=FG,
-                       font=FONT).grid(row=15, column=1, sticky="w", pady=(8, 0))
+                       font=FONT).grid(row=16, column=1, sticky="w", pady=(8, 0))
 
         # Verify host key
         self.verify_var = tk.BooleanVar(value=self.conn.get("verify_host_key", False))
@@ -923,7 +939,7 @@ class EditDialog(tk.Toplevel):
                        variable=self.verify_var,
                        bg=BG, fg=FG, selectcolor=BG_INPUT,
                        activebackground=BG, activeforeground=FG,
-                       font=FONT).grid(row=16, column=1, sticky="w", pady=(0, 8))
+                       font=FONT).grid(row=17, column=1, sticky="w", pady=(0, 8))
 
         self._auth_change()
 
@@ -952,6 +968,14 @@ class EditDialog(tk.Toplevel):
 
         self._probe_password = None  # password typed for "Ask Each Time" tests
         self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+    def _sudo_change(self):
+        if self.opt_vars["use_sudo"].get():
+            self.lbl_sudo_password.grid()
+            self.e_sudo_password.grid()
+        else:
+            self.lbl_sudo_password.grid_remove()
+            self.e_sudo_password.grid_remove()
 
     def _auth_change(self):
         auth = self.auth_var.get()
@@ -1129,6 +1153,8 @@ class EditDialog(tk.Toplevel):
             "key_path":        self.e_key.get().strip(),
             "passphrase":      (self.e_passphrase.get() if self.auth_var.get() == "key"
                                 and self.remember_passphrase_var.get() else ""),
+            "sudo_password":   (self.e_sudo_password.get()
+                                if self.opt_vars["use_sudo"].get() else ""),
             "extra_args":      self.e_extra.get().strip(),
             "auto_connect":    self.auto_var.get(),
             "verify_host_key": self.verify_var.get(),
@@ -2355,7 +2381,7 @@ class App(tk.Tk):
             initialfile="kamen-connections.json", filetypes=[("JSON files", "*.json")])
         if not path:
             return
-        conns = [{k: v for k, v in c.items() if k not in ("password", "passphrase")}
+        conns = [{k: v for k, v in c.items() if k not in ("password", "passphrase", "sudo_password")}
                  for c in self._connections]
         data = {"app": APP_NAME, "version": APP_VERSION, "connections": conns}
         try:
@@ -2366,7 +2392,7 @@ class App(tk.Tk):
             return
         self.log(f"[INFO] Exported {len(conns)} connection(s) to {path}\n")
         messagebox.showinfo("Export", f"Exported {len(conns)} connection(s).\n\n"
-                            "Passwords and key passphrases are not included.", parent=parent)
+                            "Passwords, sudo passwords and key passphrases are not included.", parent=parent)
 
     def import_connections(self, parent):
         import copy, string
@@ -2392,6 +2418,7 @@ class App(tk.Tk):
             c = dict(new_connection(), **copy.deepcopy(raw))
             c["password"] = ""
             c["passphrase"] = ""
+            c["sudo_password"] = ""
             if c["id"] in ids:
                 c["id"] = str(base + i)
             for j, t in enumerate(c.get("tunnels", [])):

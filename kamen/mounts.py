@@ -14,6 +14,10 @@ from .config import (
 from .ssh import (
     ASKPASS_ENV,
     JUMP_ENV,
+    SUDO_ENV,
+    SUDO_SSH_ENV,
+    SUDO_PROMPT,
+    SUDO_READY,
     _askpass_program,
     jump_hop_args,
     bare_host,
@@ -160,6 +164,9 @@ MOUNT_OPTIONS = [
     ("rename_fix", "Rename fix", False, ["-oworkaround=rename"],
      "For older servers that refuse saving over an existing file by renaming "
      "(some programs save that way)"),
+    ("use_sudo", "Use sudo", False, [],
+     "Run the remote SFTP server as root. Leave Sudo Password blank if "
+     "sudo -n already works; otherwise enter the separate sudo password below."),
 ]
 
 def _share_name(name, drive):
@@ -171,6 +178,49 @@ def _share_name(name, drive):
 def mount_option(conn, key):
     default = next(o[2] for o in MOUNT_OPTIONS if o[0] == key)
     return bool(conn.get("mount_options", {}).get(key, default))
+
+def _sudo_wrapper_alias():
+    """Give SSHFS-Win a no-spaces executable name for its ssh_command option.
+
+    The SSHFS version bundled with SSHFS-Win splits ssh_command on spaces,
+    even inside quotes. Link/copy our already-built executable to an alias in
+    the user's config directory; the alias is found through PATH. No SSHFS-Win
+    files are changed.
+    """
+    if not getattr(sys, "frozen", False):
+        raise RuntimeError("Password-protected sudo mounts require the packaged Kamen EXE.")
+    import hashlib
+    import shutil
+    source = os.path.abspath(sys.executable)
+    st = os.stat(source)
+    stamp = f"{source}|{st.st_size}|{st.st_mtime_ns}".encode("utf-8")
+    alias = "kamen-sudo-" + hashlib.sha256(stamp).hexdigest()[:12] + ".exe"
+    dest = CONFIG_PATH.parent / alias
+    if not dest.exists():
+        try:
+            os.link(source, dest)
+        except OSError:
+            shutil.copy2(source, dest)
+    return alias
+
+def _sudo_sftp_command(read_only, with_password):
+    """Find a usable sftp-server and run it via sudo, keeping SFTP stdio clean."""
+    paths = ("/usr/lib/openssh/sftp-server "
+             "/usr/libexec/openssh/sftp-server "
+             "/usr/lib/ssh/sftp-server "
+             "/usr/libexec/sftp-server "
+             "/usr/lib/sftp-server")
+    flags = " -R" if read_only else ""
+    if with_password:
+        # The local ssh wrapper injects the password before forwarding any SFTP
+        # bytes. The root shell emits READY on stderr only after sudo auth.
+        launch = (
+            f"exec sudo -S -p {SUDO_PROMPT} /bin/sh -c "
+            f"'echo {SUDO_READY} >&2; exec \"$@\"' kamen-sftp \"$p\"{flags}"
+        )
+    else:
+        launch = f'exec sudo -n "$p"{flags}'
+    return f'for p in {paths}; do [ -x "$p" ] || continue; {launch}; done; exit 1'
 
 def connect(conn, log=None):
     cid, drive = conn["id"], conn["drive_letter"]
@@ -230,16 +280,37 @@ def connect(conn, log=None):
         if mount_option(conn, key):
             args += opt_args
 
+    use_sudo = mount_option(conn, "use_sudo")
+    sudo_password = conn.get("sudo_password", "") if use_sudo else ""
+    if use_sudo and any(a.startswith("-osftp_server=")
+                        for a in conn.get("extra_args", "").split()):
+        if log:
+            log("[ERROR] Remove the manual -osftp_server=... from Extra Args "
+                "before enabling Use sudo.\n")
+        return False
+
     if conn.get("read_only"):
         # SSHFS-Win ignores "-o ro", so: read-only permissions on the Windows
         # side, and the server's sftp-server started with -R so it refuses
         # every write (it lives in different places on different systems).
         args = [{"-oumask=000": "-oumask=222", "-ocreate_umask=000": "-ocreate_umask=222"}.get(a, a)
                 for a in args]
-        args.append("-osftp_server=for p in /usr/lib/openssh/sftp-server "
-                    "/usr/libexec/openssh/sftp-server /usr/lib/ssh/sftp-server "
-                    "/usr/libexec/sftp-server /usr/lib/sftp-server; "
-                    "do [ -x $p ] && exec $p -R; done; exit 1")
+        if not use_sudo:
+            args.append("-osftp_server=for p in /usr/lib/openssh/sftp-server "
+                        "/usr/libexec/openssh/sftp-server /usr/lib/ssh/sftp-server "
+                        "/usr/libexec/sftp-server /usr/lib/sftp-server; "
+                        "do [ -x $p ] && exec $p -R; done; exit 1")
+
+    if use_sudo:
+        args.append("-osftp_server=" + _sudo_sftp_command(
+            bool(conn.get("read_only")), bool(sudo_password)))
+        if sudo_password:
+            try:
+                alias = _sudo_wrapper_alias()
+            except (OSError, RuntimeError) as e:
+                if log: log(f"[ERROR] Cannot prepare the local sudo helper: {e}\n")
+                return False
+            args.append("-ossh_command=" + alias + " --sudo-ssh-wrapper")
 
     if not conn.get("verify_host_key", False):
         args += ["-oStrictHostKeyChecking=no", "-oUserKnownHostsFile=/dev/null"]
@@ -272,9 +343,13 @@ def connect(conn, log=None):
     import os.path
     sshfs_dir = os.path.dirname(sshfs)
     env = os.environ.copy()
-    env["PATH"] = sshfs_dir + os.pathsep + env.get("PATH", "")
+    env["PATH"] = (sshfs_dir + os.pathsep + str(CONFIG_PATH.parent)
+                   + os.pathsep + env.get("PATH", ""))
     env.update({"SSH_ASKPASS": _askpass_program(), "SSH_ASKPASS_REQUIRE": "force",
                 ASKPASS_ENV: conn["id"]})
+    if sudo_password:
+        env.update({SUDO_ENV: conn["id"],
+                    SUDO_SSH_ENV: os.path.join(sshfs_dir, "ssh.exe")})
     if conn.get("jump_host"):
         env.update({"SHELL": _askpass_program(),
                     JUMP_ENV: os.path.join(sshfs_dir, "ssh.exe")})
