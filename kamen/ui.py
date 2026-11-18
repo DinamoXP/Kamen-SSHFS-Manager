@@ -90,7 +90,8 @@ def _askpass_main(prompt):
     """Answer one ssh prompt (ssh runs this app as SSH_ASKPASS):
     - host-key "(yes/no)?" questions -> Trust / Cancel popup
     - password prompts -> the saved password (once per ssh process)
-    - anything else (2FA codes, passphrases, Ask Each Time) -> input popup
+    - key passphrase prompts -> the saved passphrase (once per ssh process)
+    - anything else (2FA codes, Ask Each Time) -> input popup
     Cancel exits 1, which ssh treats as no answer."""
     cid = os.environ.get(ASKPASS_ENV, "")
     conn = next((c for c in load_connections() if c.get("id") == cid), {}) or {}
@@ -102,6 +103,13 @@ def _askpass_main(prompt):
     elif ("password" in low and conn.get("auth_type") == "password"
           and conn.get("password") and not _saved_password_already_tried()):
         return _write_stdout(conn["password"])
+    elif ("passphrase for key" in low and conn.get("auth_type") == "key"
+          and conn.get("passphrase") and conn.get("key_path")
+          and os.path.basename(conn["key_path"].replace("\\", "/")).lower() in low
+          and not _saved_password_already_tried()):
+        # Only respond to OpenSSH prompts naming the configured private key.
+        # Never send a stored passphrase to an arbitrary server/2FA prompt.
+        return _write_stdout(conn["passphrase"])
     else:
         kind = "secret" if any(w in low for w in ("password", "passphrase", "pin")) else "text"
     apply_theme(load_settings()["theme"])
@@ -847,6 +855,23 @@ class EditDialog(tk.Toplevel):
         mk_btn(kf, "Browse", self._browse, width=7).grid(row=0, column=1, padx=(6,0))
         self._kf = kf
 
+        # A private key may be encrypted. Remembering the passphrase is optional.
+        pp = tk.Frame(kf, bg=BG)
+        pp.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        mk_label(pp, "Passphrase", fg=FG_MUTED, font=FONT_SMALL).pack(side="left")
+        self.e_passphrase = mk_entry(pp, width=15, show="●")
+        self.e_passphrase.pack(side="left", padx=(6, 8))
+        self.e_passphrase.insert(0, self.conn.get("passphrase", ""))
+        self.remember_passphrase_var = tk.BooleanVar(
+            value=bool(self.conn.get("passphrase")))
+        remember_cb = tk.Checkbutton(
+            pp, text="Remember passphrase", variable=self.remember_passphrase_var,
+            bg=BG, fg=FG, selectcolor=BG_INPUT,
+            activebackground=BG, activeforeground=FG, font=FONT_SMALL)
+        remember_cb.pack(side="left")
+        Tooltip(remember_cb, "Stored encrypted with Windows DPAPI for this Windows user.\n"
+                             "Leave unchecked to use the passphrase only for this test.")
+
         # Extra args
         lbl("Extra Args", 10)
         self.e_extra = entry(10)
@@ -960,6 +985,7 @@ class EditDialog(tk.Toplevel):
             "remote_path": self.e_remote.get().strip() or "/",
             "auth_type": self.auth_var.get(), "password": self.e_pass.get(),
             "key_path": self.e_key.get().strip(),
+            "passphrase": self.e_passphrase.get() if self.auth_var.get() == "key" else "",
             "verify_host_key": self.verify_var.get(),
             "jump_host": self.e_jump.get().strip(),
         })
@@ -1101,6 +1127,8 @@ class EditDialog(tk.Toplevel):
             "auth_type":       self.auth_var.get(),
             "password":        self.e_pass.get(),
             "key_path":        self.e_key.get().strip(),
+            "passphrase":      (self.e_passphrase.get() if self.auth_var.get() == "key"
+                                and self.remember_passphrase_var.get() else ""),
             "extra_args":      self.e_extra.get().strip(),
             "auto_connect":    self.auto_var.get(),
             "verify_host_key": self.verify_var.get(),
@@ -2327,7 +2355,8 @@ class App(tk.Tk):
             initialfile="kamen-connections.json", filetypes=[("JSON files", "*.json")])
         if not path:
             return
-        conns = [{k: v for k, v in c.items() if k != "password"} for c in self._connections]
+        conns = [{k: v for k, v in c.items() if k not in ("password", "passphrase")}
+                 for c in self._connections]
         data = {"app": APP_NAME, "version": APP_VERSION, "connections": conns}
         try:
             with open(path, "w", encoding="utf-8") as f:
@@ -2337,7 +2366,7 @@ class App(tk.Tk):
             return
         self.log(f"[INFO] Exported {len(conns)} connection(s) to {path}\n")
         messagebox.showinfo("Export", f"Exported {len(conns)} connection(s).\n\n"
-                            "Passwords are not included.", parent=parent)
+                            "Passwords and key passphrases are not included.", parent=parent)
 
     def import_connections(self, parent):
         import copy, string
@@ -2362,6 +2391,7 @@ class App(tk.Tk):
         for i, raw in enumerate(items):
             c = dict(new_connection(), **copy.deepcopy(raw))
             c["password"] = ""
+            c["passphrase"] = ""
             if c["id"] in ids:
                 c["id"] = str(base + i)
             for j, t in enumerate(c.get("tunnels", [])):
