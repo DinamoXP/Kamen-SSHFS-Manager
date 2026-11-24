@@ -87,22 +87,20 @@ def ping_ms(host, timeout_ms=1000):
             icmp.IcmpCloseHandle(wt.HANDLE(h))
     return None
 
-class _IO_COUNTERS(ctypes.Structure):
-    _fields_ = [(n, ctypes.c_ulonglong) for n in (
-        "ReadOps", "WriteOps", "OtherOps", "ReadBytes", "WriteBytes", "OtherBytes")]
-
-def io_total(pids):
-    """Bytes read + written so far by these processes (sshfs talks to ssh
-    through pipes, so a transfer shows up here), or None if unknown."""
-    total, seen = 0, False
+def cpu_ms(pids):
+    """CPU time used so far by these processes, in ms, or None if unknown.
+    Tells a busy drive from a frozen one: moving data costs sshfs CPU, while
+    an idle or stuck sshfs uses none. (Its I/O counters can't be used: the
+    Cygwin-based SSHFS-Win moves data in ways Windows doesn't count there.)"""
+    total, seen = 0.0, False
     for pid in pids:
         h = _k32.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
         if not h:
             continue
         try:
-            c = _IO_COUNTERS()
-            if _k32.GetProcessIoCounters(wt.HANDLE(h), ctypes.byref(c)):
-                total += c.ReadBytes + c.WriteBytes + c.OtherBytes
+            t = [wt.FILETIME() for _ in range(4)]
+            if _k32.GetProcessTimes(wt.HANDLE(h), *(ctypes.byref(x) for x in t)):
+                total += sum((x.dwHighDateTime << 32 | x.dwLowDateTime) / 1e4 for x in t[2:])
                 seen = True
         finally:
             _k32.CloseHandle(wt.HANDLE(h))

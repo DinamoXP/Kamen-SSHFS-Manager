@@ -33,11 +33,13 @@ from .config import (
     setup_file_log,
 )
 from .mounts import (
+    MOUNT_FORMAT,
     MOUNT_OPTIONS,
     _find_sshfs_pids_for_drive,
     connect,
     disconnect,
     missing_requirements,
+    mount_format,
     mount_option,
 )
 from .ssh import (
@@ -58,7 +60,7 @@ from .winutil import (
     _k32,
     drive_space,
     human_size,
-    io_total,
+    cpu_ms,
     letter_present,
     ping_ms,
     probe_drive,
@@ -1642,8 +1644,8 @@ class SettingsDialog(tk.Toplevel):
         self.restart_var = tk.BooleanVar(value=settings.get("auto_restart_hung", False))
         tk.Checkbutton(body, text="Restart a drive that stops responding",
                        variable=self.restart_var, **radio).pack(anchor="w", padx=(18, 0))
-        note(f"After {HUNG_RESTART_SECS} seconds of not responding. On by default: "
-             "restarting interrupts any copy still running on that drive.")
+        note(f"After {HUNG_RESTART_SECS} seconds of no answer while no data is moving. "
+             "A drive that is just busy with a big copy is never restarted. On by default.")
 
         section("Updates")
         self.update_var = tk.BooleanVar(value=settings.get("check_updates", False))
@@ -1817,6 +1819,150 @@ class ShutdownDialog(tk.Toplevel):
         self._closed = True
         self.on_done()
 
+class DropMenu(tk.Toplevel):
+    """Dropdown under a button, drawn in the app's theme (a native tk.Menu
+    ignores most of it). items: (label, count, command); a count of 0 shows
+    the item greyed out. Closes on a click elsewhere, Escape or focus loss."""
+
+    def __init__(self, button, items):
+        super().__init__(button)
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)  # never behind the window it belongs to
+        self.configure(bg=BORDER)
+        box = tk.Frame(self, bg=BG_CARD)
+        box.pack(padx=1, pady=1, fill="both", expand=True)
+        for label, count, command in items:
+            row = tk.Frame(box, bg=BG_CARD, cursor="hand2" if count else "")
+            row.pack(fill="x")
+            name = tk.Label(row, text=label, bg=BG_CARD, fg=FG if count else FG_MUTED,
+                            font=FONT, anchor="w", padx=12, pady=7)
+            name.pack(side="left", fill="x", expand=True)
+            num = tk.Label(row, text=str(count), bg=BG_CARD, fg=FG_MUTED, font=FONT_SMALL,
+                           padx=12)
+            num.pack(side="right")
+            if not count:
+                continue
+            parts = (row, name, num)
+            def enter(e, parts=parts):
+                for w in parts:
+                    w.configure(bg=ACCENT)
+                parts[1].configure(fg="white"); parts[2].configure(fg="white")
+            def leave(e, parts=parts):
+                for w in parts:
+                    w.configure(bg=BG_CARD)
+                parts[1].configure(fg=FG); parts[2].configure(fg=FG_MUTED)
+            for w in parts:
+                w.bind("<Enter>", enter)
+                w.bind("<Leave>", leave)
+                w.bind("<Button-1>", lambda e, c=command: self._pick(c))
+        self.update_idletasks()
+        width = max(button.winfo_width(), self.winfo_reqwidth())
+        x = button.winfo_rootx() + button.winfo_width() - width  # right-aligned
+        self.geometry(f"{width}x{self.winfo_reqheight()}+{x}+{button.winfo_rooty() + button.winfo_height() + 2}")
+        self.bind("<Escape>", lambda e: self.destroy())
+        # Clicks anywhere in the app come here while it's open; one outside the
+        # dropdown closes it. Switching to another program closes it too.
+        self.bind("<Button-1>", self._click)
+        self.bind("<FocusOut>", lambda e: self.after(50, self._lost_focus))
+        self.focus_force()
+        self.grab_set()
+
+    def _click(self, e):
+        if not self.winfo_exists():
+            return
+        x, y = self.winfo_rootx(), self.winfo_rooty()
+        if not (x <= e.x_root < x + self.winfo_width() and y <= e.y_root < y + self.winfo_height()):
+            self.destroy()
+
+    def _lost_focus(self):
+        if self.winfo_exists() and self.focus_get() is None:
+            self.destroy()
+
+    def _pick(self, command):
+        self.destroy()
+        command()
+
+class DriveActionDialog(tk.Toplevel):
+    """Progress for All Drives > Connect All / Disconnect All: one row per
+    drive. `work(conn)` runs in a thread per drive and returns True on
+    success. Closes by itself when everything worked; stays open with a
+    Close button if something failed."""
+
+    def __init__(self, parent, conns, title, busy, ok_text, fail_text, work, on_row=None):
+        super().__init__(parent)
+        self.withdraw()
+        self.title(title)
+        self.configure(bg=BG)
+        self.resizable(False, False)
+        if parent.winfo_viewable():
+            self.transient(parent)
+        self._title, self._ok_text, self._fail_text = title, ok_text, fail_text
+        self._closed, self._failed = False, 0
+        self.lbl_title = mk_label(self, title, font=FONT_LARGE)
+        self.lbl_title.pack(padx=24, pady=(16, 10))
+        rows = tk.Frame(self, bg=BG)
+        rows.pack(fill="x", padx=24)
+        self._status = []
+        for i, conn in enumerate(conns):
+            mk_label(rows, conn["drive_letter"], font=FONT_BOLD).grid(row=i, column=0, sticky="w", pady=2)
+            mk_label(rows, conn.get("name", ""), fg=FG_MUTED).grid(
+                row=i, column=1, sticky="w", padx=(10, 24), pady=2)
+            st = mk_label(rows, busy, fg=WARNING)
+            st.grid(row=i, column=2, sticky="e", pady=2)
+            self._status.append(st)
+        rows.columnconfigure(1, weight=1)
+        self._bar = tk.Frame(self, bg=BG)
+        self._bar.pack(fill="x", padx=24, pady=(12, 16))
+        self.minsize(340, 0)
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        show_centered(self, parent)
+        self._pending = len(conns)
+        self._dots = 0
+        self._animate()
+        for i, conn in enumerate(conns):
+            threading.Thread(target=self._work, args=(i, conn, work, on_row), daemon=True).start()
+
+    def _work(self, i, conn, work, on_row):
+        try:
+            ok = bool(work(conn))
+        except Exception:
+            ok = False
+        try: self.after(0, self._row_done, i, ok)
+        except Exception: pass
+        if on_row:
+            on_row(conn, ok)
+
+    def _row_done(self, i, ok):
+        if self._closed:
+            return
+        self._status[i].configure(text=self._ok_text if ok else self._fail_text,
+                                  fg=SUCCESS if ok else DANGER)
+        self._failed += not ok
+        self._pending -= 1
+        if self._pending:
+            return
+        if self._failed:
+            self.lbl_title.configure(text=f"{self._title}: {self._failed} failed")
+            mk_label(self._bar, "See the Debug Log for details.", fg=FG_MUTED,
+                     font=FONT_SMALL).pack(side="left")
+            mk_btn(self._bar, "Close", self._close).pack(side="right")
+        else:
+            self.lbl_title.configure(text="Done")
+            self.after(800, self._close)
+
+    def _animate(self):
+        if self._closed or self._pending == 0:
+            return
+        self._dots = (self._dots + 1) % 4
+        self.lbl_title.configure(text=self._title + "." * self._dots)
+        self.after(400, self._animate)
+
+    def _close(self):
+        if self._pending and not self._closed:
+            return  # still working: wait (the drives keep going either way)
+        self._closed = True
+        self.destroy()
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -1880,6 +2026,7 @@ class App(tk.Tk):
         self._auto_start_tunnels()
         update.cleanup_old()
         self._update_loop()
+        self._upgrade_mounts()
         self._listen_for_show()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         if self._at_login and self._settings.get("start_minimized", True):
@@ -1933,7 +2080,8 @@ class App(tk.Tk):
         hver.pack(side="left", padx=(8, 0), pady=(6, 0))
         Tooltip(hver, build_info())
         mk_btn(hdr,"⚙ Settings", self._open_settings, bg=ACCENT).pack(side="right",padx=(4,12),pady=10)
-        mk_btn(hdr,"🔌 Disconnect All", self._disconnect_all, bg=DANGER).pack(side="right",padx=4,pady=10)
+        self._all_btn = mk_btn(hdr, "All Drives ▾", self._all_drives_menu, bg=BG_INPUT, fg=FG)
+        self._all_btn.pack(side="right", padx=4, pady=10)
         mk_btn(hdr,"+ Add Connection",  self._add, bg=SUCCESS).pack(side="right",padx=4,pady=10)
         self._hdr = hdr
 
@@ -2430,18 +2578,44 @@ class App(tk.Tk):
         save_connections(self._connections)
         self._render()
 
+    def _all_drives_menu(self):
+        """Header button: Connect All / Disconnect All."""
+        up = [c for c in self._connections if letter_present(c["drive_letter"])]
+        down = [c for c in self._connections if not letter_present(c["drive_letter"])]
+        DropMenu(self._all_btn, [
+            ("Connect All", len(down), self._connect_all),
+            ("Disconnect All", len(up), self._disconnect_all),
+        ])
+
+    def _connect_all(self):
+        conns = [c for c in self._connections if not letter_present(c["drive_letter"])]
+        if not conns:
+            return
+        missing = missing_requirements()
+        if missing:
+            self.check_requirements()
+            self.show_requirements_dialog(missing)
+            return
+        for c in conns:
+            self.set_card_status(c["id"], "connecting")
+        def done(conn, ok):
+            self.set_card_status(conn["id"], "connected" if ok else "error")
+            if not ok:
+                self.set_card_status(conn["id"], "disconnected", delay=2500)
+        DriveActionDialog(self, conns, "Connecting drives", "connecting…", "✓ connected",
+                          "⚠ failed", lambda c: connect(c, log=self.log), on_row=done)
+
     def _disconnect_all(self):
-        # Run mount checks + disconnects in a worker thread to keep the UI
-        # responsive.
-        def w():
-            for conn in self._connections:
-                try:
-                    if letter_present(conn["drive_letter"]):
-                        threading.Thread(target=disconnect, args=(conn, self.log),
-                                         daemon=True).start()
-                except Exception:
-                    pass
-        threading.Thread(target=w, daemon=True).start()
+        conns = [c for c in self._connections if letter_present(c["drive_letter"])]
+        if not conns:
+            return
+        for c in conns:
+            self.set_card_status(c["id"], "stopping")
+        def done(conn, ok):
+            self.set_card_status(conn["id"], "disconnected" if ok else "hung")
+        DriveActionDialog(self, conns, "Disconnecting drives", "disconnecting…",
+                          "✓ unmounted", "⚠ still mounted",
+                          lambda c: disconnect(c, log=self.log), on_row=done)
 
     def _auto_connect(self):
         conns = [c for c in self._connections
@@ -2507,7 +2681,7 @@ class App(tk.Tk):
             hits = {}        # drive -> consecutive "hung" probes
             space_at = {}    # drive -> last free-space check
             since = {}       # drive -> time it was first reported hung
-            io_seen = {}     # drive -> sshfs bytes moved at the last slow probe
+            io_seen = {}     # drive -> sshfs CPU time (ms) at the last slow probe
             restarted = set()
             first = True
             while first or not self._stop.wait(5):
@@ -2527,9 +2701,9 @@ class App(tk.Tk):
                         continue
                     if state == "hung":
                         # Slow to answer while a big copy is running isn't
-                        # frozen: if sshfs moved data since the last slow
-                        # probe, it's busy, so don't count it (or restart it).
-                        io = io_total(_find_sshfs_pids_for_drive(drive))
+                        # frozen: if sshfs did work (used CPU) since the last
+                        # slow probe, it's busy, so don't count it (or restart it).
+                        io = cpu_ms(_find_sshfs_pids_for_drive(drive))
                         busy = io is not None and io_seen.get(drive) not in (None, io)
                         io_seen[drive] = io
                         if busy:
@@ -2565,6 +2739,49 @@ class App(tk.Tk):
                         return  # app closed
                     # main loop not started yet: try again on the next round
         threading.Thread(target=loop, daemon=True).start()
+
+    def _upgrade_mounts(self):
+        """Drives mounted by an older version the way that version mounted them
+        (MOUNT_FORMAT) are remounted, so changes to how drives are mounted take
+        effect right away. Each one waits until no data is moving, so a copy in
+        progress isn't cut off."""
+        def work():
+            if self._stop.wait(8):  # let the first status checks settle
+                return
+            while not self._stop.is_set():
+                pending = 0
+                for conn in list(self._connections):
+                    drive = conn["drive_letter"]
+                    fmt = mount_format(drive)
+                    if fmt is None or fmt >= MOUNT_FORMAT:
+                        continue
+                    if self._drive_state.get(drive) != "mounted":
+                        pending += 1  # hung or still being checked: later
+                        continue
+                    pids = _find_sshfs_pids_for_drive(drive)
+                    before = cpu_ms(pids)
+                    if self._stop.wait(3):
+                        return
+                    if cpu_ms(pids) != before:
+                        pending += 1  # busy: try again soon
+                        continue
+                    self.log(f"[INFO] {drive} ({conn['name']}) was mounted by an older "
+                             f"version; remounting it so this version's drive settings "
+                             f"take effect.\n")
+                    try:
+                        self.after(0, lambda c=conn["id"]: self.kill_mount(c, then_connect=True))
+                    except RuntimeError:
+                        return
+                    for _ in range(60):  # wait for this one before the next drive
+                        if self._stop.wait(1):
+                            return
+                        if mount_format(drive) == MOUNT_FORMAT:
+                            break
+                if not pending:
+                    return
+                if self._stop.wait(30):
+                    return
+        threading.Thread(target=work, daemon=True).start()
 
     def _ping_server(self, conn):
         """Poll worker, every 30 s per connected drive: ping time for its card."""

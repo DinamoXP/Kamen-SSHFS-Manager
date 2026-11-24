@@ -10,7 +10,7 @@ connections, 2FA support and automatic reconnect.
 **[Download the latest version](https://github.com/DinamoXP/Kamen-SSHFS-Manager/releases/latest/download/Kamen.SSHFS.Manager.exe)** (Windows 10/11, 64-bit) and see
 [Install](#install).
 
-![Kamen SSHFS Manager main window with three connections, two of them mounted](images/main.jpg?v=744f031f)
+![Kamen SSHFS Manager main window with three connections, two of them mounted](images/main.jpg?v=58a344f4)
 
 ## Install
 
@@ -57,12 +57,13 @@ From then on, updates come through **Update Now**.
 
 | New connection | Settings |
 |:---:|:---:|
-| ![Connection details form with Test Connection and Browse](images/new_connection.jpg?v=516857a0) | ![Settings window with theme, startup, connections, drive, update and logging options](images/settings.jpg?v=30916763) |
+| ![Connection details form with Test Connection and Browse](images/new_connection.jpg?v=91343460) | ![Settings window with theme, startup, connections, drive, update and logging options](images/settings.jpg?v=e23f0f4e) |
 
 ## Features
 
 - Add, edit and delete SSH connections
-- Connect and disconnect per connection, or **Disconnect All**
+- Connect and disconnect per connection, or all at once with **All Drives**
+  (**Connect All** / **Disconnect All**, with a progress window)
 - Hosts by name, IPv4 or IPv6 address (see [Host Addresses](#host-addresses))
 - Three auth methods: Password, Private Key, Ask Each Time
 - **Key login...** sets up a login key on the server for you, so no password
@@ -342,7 +343,7 @@ another machine the server can reach (e.g. a NAS on the server's network).
 |------------------------------------------------|-------------------------------------------------|
 | `<path>: No such file or directory`            | Remote path doesn't exist - Edit → Test Connection → Browse… |
 | `read: Connection reset by peer`               | ssh quit before mounting - run Test Connection for the real reason (password, host key, network) |
-| An AI tool or editor says the drive's folder can't be reached, though Explorer opens it | Drives mounted before v1.9.1 lack the network-share registration some tools need: click **Disconnect All**, then connect again |
+| An AI tool or editor says the drive's folder can't be reached, though Explorer opens it | Drives mounted before v1.9.1 lack the network-share registration some tools need: use **All Drives > Disconnect All**, then **Connect All** |
 | `sshfs.exe not found`                          | Install WinFsp, then SSHFS-Win                  |
 | `[HUNG] X: not responding since ...`           | The drive's sshfs stopped answering. Click **Restart** on its card, or **Kill** to remove the drive |
 | Banner: WinFsp / SSHFS-Win not installed       | Use the Get… buttons, install, then click Re-check |
@@ -404,7 +405,7 @@ All in `%APPDATA%\kamen-sshfs-manager\`:
 
 The app is a single exe with no installer. To remove it completely:
 
-1. Open the app, click **Disconnect All**, then in **⚙ Settings** untick
+1. Open the app, choose **All Drives > Disconnect All**, then in **⚙ Settings** untick
    **Start with Windows** and click **Save**.
 2. Exit the app and delete `Kamen SSHFS Manager.exe`.
 3. Delete the folder `%APPDATA%\kamen-sshfs-manager` (saved connections and

@@ -1,6 +1,7 @@
 """Mounting and unmounting drives with SSHFS-Win."""
 
 import ctypes
+import json
 import os
 import subprocess
 import sys
@@ -161,6 +162,46 @@ MOUNT_OPTIONS = [
      "For older servers that refuse saving over an existing file by renaming "
      "(some programs save that way)"),
 ]
+
+# Bump this whenever a change to the sshfs arguments only takes effect after a
+# drive is mounted again: on start the app then remounts drives mounted the
+# older way by itself (see App._upgrade_mounts). 1 = before 1.9.1,
+# 2 = VolumePrefix (network share registration).
+MOUNT_FORMAT = 2
+_FORMATS_PATH = CONFIG_PATH.parent / "mounts.json"
+
+def _load_formats():
+    try:
+        with open(_FORMATS_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_format(drive, fmt):
+    formats = _load_formats()
+    if fmt is None:
+        formats.pop(drive, None)
+    else:
+        formats[drive] = fmt
+    try:
+        with open(_FORMATS_PATH, "w", encoding="utf-8") as f:
+            json.dump(formats, f)
+    except OSError:
+        pass
+
+def mount_format(drive):
+    """MOUNT_FORMAT the drive's current mount was made with, or None if this
+    app's sshfs isn't serving it. Mounts from versions that didn't record it
+    are recognised by their command line."""
+    pids = _find_sshfs_pids_for_drive(drive)
+    if not pids:
+        return None
+    fmt = _load_formats().get(drive)
+    if fmt is not None:
+        return fmt
+    if any("-ovolumeprefix=/kamen/" in _process_cmdline(int(p)).lower() for p in pids):
+        return 2
+    return 1
 
 def _share_name(name, drive):
     """Connection name as a share name: without characters a UNC path can't
@@ -329,6 +370,7 @@ def connect(conn, log=None):
             time.sleep(0.5)
             if result[0] or letter_present(drive):
                 if log: log(f"[OK] {drive} mounted as '{name}'.\n")
+                _save_format(drive, MOUNT_FORMAT)
                 mounted[0] = True  # stop log streaming; threads keep draining
                 _notify_explorer_drive_change(drive, added=True)
                 return True
@@ -368,6 +410,7 @@ def _find_sshfs_pids_for_drive(drive: str):
 
 def disconnect(conn, log=None):
     cid, drive = conn["id"], conn["drive_letter"]
+    _save_format(drive, None)
     if log: log(f"[INFO] Disconnecting {drive}...\n")
 
     # 1. Kill the tracked process for this connection only
