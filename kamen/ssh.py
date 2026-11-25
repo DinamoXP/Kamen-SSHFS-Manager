@@ -281,6 +281,205 @@ def jump_shell_main(command):
     return subprocess.call(words, stdin=std[0], stdout=std[1], stderr=std[2],
                            creationflags=subprocess.CREATE_NO_WINDOW)
 
+# Only connection IDs and the location of ssh.exe travel in the environment.
+# The sudo password remains in the DPAPI-protected connections.json.
+SUDO_ENV = "KAMEN_SSHFS_SUDO_ID"
+SUDO_SSH_ENV = "KAMEN_SSHFS_SUDO_SSH"
+SUDO_PROMPT = "__KAMEN_SUDO_PROMPT__"
+SUDO_READY = "__KAMEN_SUDO_READY__"
+
+def sudo_ssh_wrapper_main(ssh_args):
+    """Authenticate sudo, then relay unmodified binary SFTP traffic.
+
+    Cygwin SSHFS connects SSH using a socketpair. Its inherited standard
+    handles may be Winsock sockets, not Windows file handles; Python's CRT
+    os.read/os.write and subprocess stdout redirection cannot use those
+    sockets reliably. Keep the SSH child's stdio on pipes and relay bytes
+    separately using Winsock for socket handles.
+    """
+    import msvcrt
+    import socket
+    from .config import load_connections
+
+    cid = os.environ.get(SUDO_ENV, "")
+    conn = next((c for c in load_connections() if c.get("id") == cid), None)
+    secret = conn.get("sudo_password", "") if conn else ""
+    ssh = os.environ.get(SUDO_SSH_ENV, "")
+    if not secret or not os.path.isfile(ssh):
+        return 1
+
+    k32 = ctypes.windll.kernel32
+    k32.GetStdHandle.restype = wt.HANDLE
+
+    def std_stream(which, flags):
+        handle = k32.GetStdHandle(which)
+        if not handle or handle == ctypes.c_void_p(-1).value:
+            raise OSError("SSHFS did not provide standard streams")
+
+        # Cygwin's socketpair reaches a native Windows child as a Winsock
+        # handle. Test it before falling back to ordinary CRT file I/O.
+        try:
+            sock = socket.socket(fileno=handle)
+        except OSError:
+            sock = None
+        if sock is not None:
+            try:
+                sock.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE)
+            except OSError:
+                sock.detach()
+            else:
+                sock.setblocking(True)
+                return sock, True
+        return msvcrt.open_osfhandle(handle, flags | os.O_BINARY), False
+
+    def read_from(stream, is_socket):
+        return stream.recv(32768) if is_socket else os.read(stream, 32768)
+
+    def write_to(stream, is_socket, data):
+        if is_socket:
+            stream.sendall(data)
+        else:
+            offset = 0
+            while offset < len(data):
+                written = os.write(stream, data[offset:])
+                if written <= 0:
+                    raise BrokenPipeError("SSHFS stream closed")
+                offset += written
+
+    try:
+        input_stream, input_socket = std_stream(-10, os.O_RDONLY)
+        output_stream, output_socket = std_stream(-11, os.O_WRONLY)
+    except OSError:
+        return 1
+    try:
+        error_stream, error_socket = std_stream(-12, os.O_WRONLY)
+    except OSError:
+        error_stream, error_socket = None, False
+
+    def emit(data):
+        try:
+            if data and error_stream is not None:
+                write_to(error_stream, error_socket, data)
+        except OSError:
+            pass
+
+    # Never pass SSHFS's inherited socket as stdout to Popen: Windows
+    # subprocess only supports regular inheritable handles there.
+    try:
+        child = subprocess.Popen(
+            [ssh] + list(ssh_args),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+    except OSError as e:
+        emit(f"[Kamen sudo] Cannot start SSH: {e}\n".encode())
+        return 1
+
+    def forward_output():
+        try:
+            while True:
+                data = child.stdout.read(32768)
+                if not data:
+                    break
+                write_to(output_stream, output_socket, data)
+        except OSError:
+            if child.poll() is None:
+                try:
+                    child.terminate()
+                except OSError:
+                    pass
+
+    output_worker = threading.Thread(target=forward_output, daemon=True)
+    output_worker.start()
+
+    ready = threading.Event()
+    stderr_finished = threading.Event()
+    sent = [False]
+    password_bytes = secret.encode("utf-8") + b"\n"
+    prompt_mark = SUDO_PROMPT.encode("ascii")
+    ready_mark = SUDO_READY.encode("ascii")
+    keep = max(len(prompt_mark), len(ready_mark)) - 1
+
+    def write_ssh(data):
+        offset = 0
+        while offset < len(data):
+            written = child.stdin.write(data[offset:])
+            if not written:
+                raise BrokenPipeError("SSH connection closed")
+            offset += written
+
+    def read_errors():
+        pending = b""
+        try:
+            while True:
+                chunk = os.read(child.stderr.fileno(), 4096)
+                if not chunk:
+                    break
+                pending += chunk
+                while pending:
+                    markers = [(i, tag) for tag in (prompt_mark, ready_mark)
+                               if (i := pending.find(tag)) >= 0]
+                    if markers:
+                        i, tag = min(markers, key=lambda item: item[0])
+                        emit(pending[:i])
+                        pending = pending[i + len(tag):]
+                        if tag == ready_mark:
+                            ready.set()
+                        elif sent[0]:
+                            emit(b"[Kamen sudo] Incorrect sudo password.\n")
+                            child.terminate()
+                            return
+                        else:
+                            sent[0] = True
+                            try:
+                                write_ssh(password_bytes)
+                            except OSError:
+                                return
+                    else:
+                        if len(pending) > keep:
+                            emit(pending[:-keep])
+                            pending = pending[-keep:]
+                        break
+            emit(pending)
+        except OSError:
+            pass
+        finally:
+            stderr_finished.set()
+
+    worker = threading.Thread(target=read_errors, daemon=True)
+    worker.start()
+
+    # SFTP packets must not reach sudo's password prompt.
+    while not ready.wait(0.1):
+        if child.poll() is not None or stderr_finished.is_set():
+            worker.join(timeout=0.5)
+            return child.returncode or 1
+
+    # Read SSHFS input independently so the wrapper can still exit when the
+    # SSH child closes while SSHFS is waiting for a response.
+    def forward_input():
+        try:
+            while True:
+                data = read_from(input_stream, input_socket)
+                if not data:
+                    break
+                write_ssh(data)
+        except OSError:
+            pass
+        finally:
+            try:
+                child.stdin.close()
+            except OSError:
+                pass
+
+    threading.Thread(target=forward_input, daemon=True).start()
+    result = child.wait()
+    output_worker.join(timeout=1)
+    worker.join(timeout=1)
+    return result
+
 KEYS_DIR = CONFIG_PATH.parent / "keys"
 
 def setup_key_login(conn, password, prompt=None):
