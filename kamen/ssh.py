@@ -288,6 +288,9 @@ SUDO_SSH_ENV = "KAMEN_SSHFS_SUDO_SSH"
 SUDO_PROMPT = "__KAMEN_SUDO_PROMPT__"
 SUDO_READY = "__KAMEN_SUDO_READY__"
 
+def sudo_error_path(cid):
+    return CONFIG_PATH.parent / f"sudo-error-{cid}.txt"
+
 def sudo_ssh_wrapper_main(ssh_args):
     """Authenticate sudo, then relay unmodified binary SFTP traffic.
 
@@ -356,12 +359,27 @@ def sudo_ssh_wrapper_main(ssh_args):
     except OSError:
         error_stream, error_socket = None, False
 
+    ready = threading.Event()
+    early = []  # what sudo said before it let us in, for sudo_error_path()
+
     def emit(data):
+        if data and not ready.is_set():
+            early.append(data)
         try:
             if data and error_stream is not None:
                 write_to(error_stream, error_socket, data)
         except OSError:
             pass
+
+    def save_error():
+        # SSHFS-Win doesn't pass our stderr on to the app, so leave the reason
+        # in a file that connect() reads when the mount fails.
+        text = b"".join(early).decode("utf-8", "replace").strip()
+        if text:
+            try:
+                sudo_error_path(cid).write_text(text, encoding="utf-8")
+            except OSError:
+                pass
 
     # Never pass SSHFS's inherited socket as stdout to Popen: Windows
     # subprocess only supports regular inheritable handles there.
@@ -394,7 +412,6 @@ def sudo_ssh_wrapper_main(ssh_args):
     output_worker = threading.Thread(target=forward_output, daemon=True)
     output_worker.start()
 
-    ready = threading.Event()
     stderr_finished = threading.Event()
     sent = [False]
     password_bytes = secret.encode("utf-8") + b"\n"
@@ -455,6 +472,7 @@ def sudo_ssh_wrapper_main(ssh_args):
     while not ready.wait(0.1):
         if child.poll() is not None or stderr_finished.is_set():
             worker.join(timeout=0.5)
+            save_error()
             return child.returncode or 1
 
     # Read SSHFS input independently so the wrapper can still exit when the

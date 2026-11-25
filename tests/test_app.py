@@ -99,6 +99,27 @@ class ShareName(unittest.TestCase):
         self.assertEqual(mounts._share_name("  ...  ", "K:"), "K")
 
 
+class PassphrasePrompt(unittest.TestCase):
+    def test_prompt_names_key(self):
+        from kamen.ui import _prompt_names_key
+        short = "C:\\keys\\id_ed25519"
+        self.assertTrue(_prompt_names_key("Enter passphrase for key 'C:/keys/id_ed25519': ", short))
+        self.assertFalse(_prompt_names_key("Enter passphrase for key 'C:/keys/other': ", short))
+        self.assertFalse(_prompt_names_key("Password: ", short))
+        long_path = "C:/Users/someone/AppData/Local/" + "x" * 90 + "/id_ed25519"
+        cut = long_path[:100]
+        self.assertTrue(_prompt_names_key(f"Enter passphrase for key '{cut}': ", long_path))
+
+
+class ForeignDrive(unittest.TestCase):
+    def test_free_letter_is_not_foreign(self):
+        free = next(f"{c}:" for c in "QRSTUVWXYZ" if not winutil.letter_present(f"{c}:"))
+        self.assertIsNone(mounts.foreign_drive(free))
+
+    def test_system_drive_is_foreign(self):
+        self.assertIn("local disk", mounts.foreign_drive("C:"))
+
+
 class Helpers(unittest.TestCase):
     def test_cpu_ms(self):
         import os

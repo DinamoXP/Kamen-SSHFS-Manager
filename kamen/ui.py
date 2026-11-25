@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -38,6 +39,7 @@ from .mounts import (
     _find_sshfs_pids_for_drive,
     connect,
     disconnect,
+    foreign_drive,
     missing_requirements,
     mount_format,
     mount_option,
@@ -88,6 +90,18 @@ FONT_SMALL = ("Segoe UI", 9)
 
 FONT_MONO  = ("Consolas", 9)
 
+def _prompt_names_key(prompt, key_path):
+    """Is this "Enter passphrase for key '<path>':" prompt about key_path?
+    OpenSSH cuts the path in the prompt after 100 characters, so a long path
+    only shows its beginning."""
+    shown = prompt[prompt.find("'") + 1:prompt.rfind("'")] if prompt.count("'") >= 2 else ""
+    norm = lambda p: p.replace("\\", "/").lower()
+    shown, key = norm(shown), norm(key_path)
+    if not shown:
+        return False
+    return (key == shown or shown.endswith("/" + key.rsplit("/", 1)[-1])
+            or (len(shown) >= 100 and key.startswith(shown)))
+
 def _askpass_main(prompt):
     """Answer one ssh prompt (ssh runs this app as SSH_ASKPASS):
     - host-key "(yes/no)?" questions -> Trust / Cancel popup
@@ -107,7 +121,7 @@ def _askpass_main(prompt):
         return _write_stdout(conn["password"])
     elif ("passphrase for key" in low and conn.get("auth_type") == "key"
           and conn.get("passphrase") and conn.get("key_path")
-          and os.path.basename(conn["key_path"].replace("\\", "/")).lower() in low
+          and _prompt_names_key(prompt, conn["key_path"])
           and not _saved_password_already_tried()):
         # Only respond to OpenSSH prompts naming the configured private key.
         # Never send a stored passphrase to an arbitrary server/2FA prompt.
@@ -155,26 +169,51 @@ def _bind_mousewheel(widget, on_scroll, container=None):
     target.bind("<Enter>", enter)
     target.bind("<Leave>", leave)
 
+# The logo comes from icon.ico (sizes 16 to 256), which the exe carries next
+# to version.json.
+_ICON_PATH = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent)) / "icon.ico"
+
 def _make_logo(size: int = 64):
-    """Stylized 'K' monogram - dark rounded square + accent-blue letterform.
-    Returns a PIL Image, or None if PIL is unavailable.
-    PIL's ImageDraw doesn't anti-alias, so draw at 8x and downsample with
-    LANCZOS to get smooth diagonals and corners."""
+    """The app logo as a size x size PIL Image (None if PIL is unavailable).
+    Uses the nearest icon.ico size at or above `size`; without icon.ico a
+    simple K is drawn instead."""
     try:
         from PIL import Image
     except Exception:
         return None
-    ss = 8
-    return _draw_logo(size, ss).resize((size, size), Image.LANCZOS)
+    try:
+        ico = Image.open(_ICON_PATH)
+        sizes = sorted(s[0] for s in ico.info["sizes"])
+        best = next((s for s in sizes if s >= size), sizes[-1])
+        img = ico.ico.getimage((best, best)).convert("RGBA")
+    except Exception:
+        ss = 8  # ImageDraw doesn't anti-alias: draw 8x larger, then shrink
+        img = _draw_logo(size, ss)
+    return img if img.size == (size, size) else img.resize((size, size), Image.LANCZOS)
 
 LOGO_BLUE = "#4C9EEB"  # brand colour, same in both themes
 
 LOGO_BG   = "#22262F"
 
+_tiles = {}
+
+def _tile_image(size, fill, outline, radius=12):
+    """Rounded drive tile for a card. Drawn 8x larger and scaled down so the
+    corners are smooth (Tk's canvas draws them jagged)."""
+    key = (size, fill, outline, radius)
+    if key not in _tiles:
+        from PIL import Image, ImageDraw, ImageTk
+        ss = 8
+        S = size * ss
+        img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+        ImageDraw.Draw(img).rounded_rectangle(
+            (ss // 2, ss // 2, S - 1 - ss // 2, S - 1 - ss // 2), radius=radius * ss,
+            fill=fill, outline=outline, width=round(1.5 * ss))
+        _tiles[key] = ImageTk.PhotoImage(img.resize((size, size), Image.LANCZOS))
+    return _tiles[key]
+
 def _draw_logo(size: int, ss: int = 1):
-    """Draw the logo for a `size`-px icon on a canvas `ss` times larger.
-    Minimum stroke widths are in final pixels, so small icons keep a
-    visible border after downsampling."""
+    """Fallback logo drawn with shapes only, for when icon.ico is missing."""
     from PIL import Image, ImageDraw
     S = size * ss
     img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
@@ -478,11 +517,7 @@ class Card(tk.Frame):
         t = self.TILE
         self.cv = tk.Canvas(self, width=t, height=t, bg=BG_CARD, highlightthickness=0)
         self.cv.pack(side="left", padx=(12, 12), pady=10)
-        r, x0, y0, x1, y1 = 9, 1, 1, t - 1, t - 1
-        pts = [x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r, x1, y1 - r, x1, y1,
-               x1 - r, y1, x0 + r, y1, x0, y1, x0, y1 - r, x0, y0 + r, x0, y0]
-        self._tile = self.cv.create_polygon(pts, smooth=True, width=1.5,
-                                            fill=BG_INPUT, outline=BORDER)
+        self._tile = self.cv.create_image(t / 2, t / 2, image=_tile_image(t, BG_INPUT, BORDER))
         self._tile_text = self.cv.create_text(t / 2, t / 2, text=self.conn["drive_letter"] + "\\",
                                               fill=FG_MUTED, font=("Consolas", 13, "bold"))
         self.cv.bind("<Button-1>", lambda e: self._open())  # click the tile to open the drive
@@ -536,6 +571,8 @@ class Card(tk.Frame):
             menu.add_command(label="Kill", command=self._kill)
         elif st == "connected":
             menu.add_command(label="Disconnect", command=self._disconnect)
+        elif st == "foreign":
+            menu.add_command(label="Change Letter...", command=self._toggle)
         else:
             menu.add_command(label="Connect", command=self._connect,
                              state="normal" if st in ("disconnected", "error") else "disabled")
@@ -600,20 +637,30 @@ class Card(tk.Frame):
             return  # no-op when unchanged - avoids flicker from poll loop
         self._status = status
         dot_colors = {"connected": SUCCESS, "connecting": WARNING, "stopping": WARNING,
-                      "hung": WARNING, "disconnected": FG_MUTED, "error": DANGER}
+                      "hung": WARNING, "disconnected": FG_MUTED, "error": DANGER,
+                      "foreign": DANGER}
         color = dot_colors.get(status, FG_MUTED)
-        self.cv.itemconfig(self._tile, fill=_blend(BG_CARD, color, 0.16),
-                           outline=_blend(BG_CARD, color, 0.6))
+        self.cv.itemconfig(self._tile, image=_tile_image(
+            self.TILE, _blend(BG_CARD, color, 0.16), _blend(BG_CARD, color, 0.6)))
         self.cv.itemconfig(self._tile_text, fill=color, text=self.conn["drive_letter"] + "\\")
         self.cv.configure(cursor="hand2" if status == "connected" else "")
         if status == "hung":
-            self.lbl_drive.configure(text="not responding")
+            self.lbl_drive.configure(text="not responding", fg=WARNING)
             self.btn_kill.pack(side="left", padx=3, after=self.btn_con)
+        elif status == "foreign":
+            drive = self.conn["drive_letter"]
+            other = self.mgr._foreign.get(drive, "another drive")
+            text = (f"waiting for {drive} to be free" if self.conn["id"] in self.mgr._wait_free
+                    else f"{drive} is used by {other}")
+            self.lbl_drive.configure(text=text, fg=DANGER)
+            self.btn_kill.pack_forget()
         else:
-            self.lbl_drive.configure(text="")
+            self.lbl_drive.configure(text="", fg=WARNING)
             self.btn_kill.pack_forget()
         self.mgr.fit_width()
-        if status == "hung":
+        if status == "foreign":
+            self.btn_con.configure(text="Change Letter", bg=WARNING, fg="white", state="normal")
+        elif status == "hung":
             self.btn_con.configure(text="Restart", bg=WARNING, fg="white", state="normal")
         elif status in ("checking", "stopping"):
             text = "Checking…" if status == "checking" else "Stopping…"
@@ -628,6 +675,9 @@ class Card(tk.Frame):
     def _toggle(self):
         if self._status == "connected": self._disconnect()
         elif self._status == "hung": self._restart()
+        elif self._status == "foreign":
+            self.mgr._wait_free.discard(self.conn["id"])
+            self.mgr._letter_taken(self.conn["id"])
         else: self._connect()
 
     def _restart(self):
@@ -1799,6 +1849,42 @@ class UpdateDialog(tk.Toplevel):
         self.destroy()
         self.on_ok(keep)
 
+class LetterTakenDialog(tk.Toplevel):
+    """A connection's drive letter is used by another drive (USB stick, CD
+    drive, other share). Offers the next free letter, waiting for the letter
+    to be free again, or picking one in Edit."""
+
+    def __init__(self, parent, conn, other, free, on_use, on_wait, on_choose):
+        super().__init__(parent)
+        self.withdraw()
+        drive = conn["drive_letter"]
+        self.title("Drive letter in use")
+        self.configure(bg=BG)
+        self.resizable(False, False)
+        if parent.winfo_viewable():
+            self.transient(parent)
+        self.attributes("-topmost", True)
+        mk_label(self, f"{drive} is used by {other}", font=FONT_LARGE).pack(
+            padx=24, pady=(16, 8), anchor="w")
+        mk_label(self, f"{conn['name']} needs another drive letter, or it can wait "
+                 f"until {drive} is free.",
+                 fg=FG_MUTED, font=FONT_SMALL, wraplength=420,
+                 justify="left").pack(padx=24, anchor="w")
+        bar = tk.Frame(self, bg=BG)
+        bar.pack(fill="x", padx=24, pady=(16, 16))
+        def pick(fn):
+            def go():
+                self.destroy()
+                fn()
+            return go
+        if free:
+            mk_btn(bar, f"Use {free} instead", pick(on_use), bg=SUCCESS, fg="white").pack(
+                side="right", padx=(6, 0))
+        mk_btn(bar, f"Wait for {drive}", pick(on_wait)).pack(side="right", padx=(6, 0))
+        mk_btn(bar, "Choose a letter…", pick(on_choose)).pack(side="right")
+        self.bind("<Escape>", lambda e: self.destroy())
+        show_centered(self, parent)
+
 class ShutdownDialog(tk.Toplevel):
     """Shown on Exit while drives unmount in background threads. Calls
     on_done() when all are finished, or after `timeout_ms` regardless."""
@@ -2060,7 +2146,10 @@ class App(tk.Tk):
         self._cards = {}
         self._fit_pending = False
         self._ping = {}  # connection id -> last ping in ms (None: no answer)
-        self._drive_state = {}  # drive -> "mounted" / "unmounted" / "hung", set by the poll worker
+        self._drive_state = {}  # drive -> "mounted" / "unmounted" / "hung" / "foreign", set by the poll worker
+        self._foreign = {}  # drive -> what else uses that letter, e.g. "magicJack (CD drive)"
+        self._wait_free = set()  # connection ids to connect once their letter is free again
+        self._taken_dialogs = {}  # connection id -> open LetterTakenDialog
         self.tunnels = TunnelManager(self.on_tunnel_change)
         self._tunnel_windows = {}
         setup_file_log(self._settings["log_enabled"])
@@ -2337,7 +2426,7 @@ class App(tk.Tk):
         card = self._cards.get(cid)
         if not card:
             return
-        if not (old and letter_present(old["drive_letter"])):
+        if not (old and self._ours_mounted(old)):
             card._connect()
             return
         card._set("stopping")
@@ -2637,7 +2726,7 @@ class App(tk.Tk):
 
     def _all_drives_menu(self):
         """Header button: Connect All / Disconnect All."""
-        up = [c for c in self._connections if letter_present(c["drive_letter"])]
+        up = [c for c in self._connections if self._ours_mounted(c)]
         down = [c for c in self._connections if not letter_present(c["drive_letter"])]
         DropMenu(self._all_btn, [
             ("Connect All", len(down), self._connect_all),
@@ -2662,8 +2751,13 @@ class App(tk.Tk):
         DriveActionDialog(self, conns, "Connecting drives", "connecting…", "✓ connected",
                           "⚠ failed", lambda c: connect(c, log=self.log), on_row=done)
 
+    def _ours_mounted(self, conn):
+        """Is this connection's drive mounted? Its letter being there isn't
+        enough: another device may be using it (see foreign_drive)."""
+        return letter_present(conn["drive_letter"]) and conn["drive_letter"] not in self._foreign
+
     def _disconnect_all(self):
-        conns = [c for c in self._connections if letter_present(c["drive_letter"])]
+        conns = [c for c in self._connections if self._ours_mounted(c)]
         if not conns:
             return
         for c in conns:
@@ -2750,6 +2844,24 @@ class App(tk.Tk):
                     try:
                         want = time.time() - space_at.get(drive, 0) >= 30
                         state = probe_drive(drive, want_space=want)
+                        other = foreign_drive(drive) if state == "mounted" else None
+                        if other:
+                            state = "foreign"
+                            if self._foreign.get(drive) != other:
+                                self._foreign[drive] = other
+                                self.log(f"[WARN] {drive} is used by {other}, not by "
+                                         f"{conn['name']}. Pick another drive letter "
+                                         f"for {conn['name']} in Edit.\n")
+                                self._notify(f"{drive} is not {conn['name']}: it's used by "
+                                             f"{other}. Pick another drive letter.")
+                                self.after(0, self._letter_taken, cid)
+                        elif state != "hung":
+                            self._foreign.pop(drive, None)
+                            if state == "unmounted" and cid in self._wait_free:
+                                self._wait_free.discard(cid)
+                                self.log(f"[INFO] {drive} is free again, connecting "
+                                         f"{conn['name']}.\n")
+                                self.after(0, card._connect)
                         if want and state == "mounted":
                             space_at[drive] = time.time()
                             threading.Thread(target=self._ping_server, args=(conn,),
@@ -2853,6 +2965,49 @@ class App(tk.Tk):
         self._notify(f"{conn['name']} ({drive}) is not responding. "
                      f"Open {APP_NAME} to restart it.")
 
+    def _free_letter(self):
+        import string
+        taken = {c["drive_letter"] for c in self._connections}
+        free = [f"{l}:" for l in reversed(string.ascii_uppercase[3:])
+                if f"{l}:" not in taken and not letter_present(f"{l}:")]
+        return free[0] if free else None
+
+    def _letter_taken(self, cid):
+        """Poll worker found this connection's letter used by another drive."""
+        conn = self.find_conn(cid)
+        old = self._taken_dialogs.get(cid)
+        if not conn or cid in self._wait_free or (old and old.winfo_exists()):
+            return
+        drive = conn["drive_letter"]
+        other = self._foreign.get(drive)
+        if not other:
+            return
+        free = self._free_letter()
+
+        def use():
+            c = self.find_conn(cid)
+            new = self._free_letter()
+            if not c or not new:
+                return
+            self.log(f"[INFO] {c['name']} moved from {c['drive_letter']} to {new}.\n")
+            c["drive_letter"] = new
+            save_connections(self._connections)
+            self._render()
+            card = self._cards.get(cid)
+            if card:
+                card._connect()
+
+        def wait():
+            self._wait_free.add(cid)
+            self.log(f"[INFO] {conn['name']} connects by itself when {drive} is free again.\n")
+            card = self._cards.get(cid)
+            if card:
+                card._status = None
+                card._set("foreign")
+
+        self._taken_dialogs[cid] = LetterTakenDialog(
+            self, conn, other, free, use, wait, lambda: self.open_edit_dialog(self.find_conn(cid)))
+
     def _notify(self, msg):
         icon = self._tray_icon
         if icon:
@@ -2862,7 +3017,8 @@ class App(tk.Tk):
                 pass
 
     def _apply_poll_snapshot(self, snapshot):
-        status = {"mounted": "connected", "unmounted": "disconnected", "hung": "hung"}
+        status = {"mounted": "connected", "unmounted": "disconnected", "hung": "hung",
+                  "foreign": "foreign"}
         for cid, state in snapshot:
             card = self._cards.get(cid)
             if card and card._status not in ("connecting", "stopping"):
@@ -3097,7 +3253,7 @@ class App(tk.Tk):
         self._on_close()
 
     def _on_close(self):
-        mounted = [c for c in self._connections if letter_present(c["drive_letter"])]
+        mounted = [c for c in self._connections if self._ours_mounted(c)]
         tunnels = self.tunnels.active_count()
         if mounted or tunnels:
             what = []

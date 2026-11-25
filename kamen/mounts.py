@@ -19,6 +19,7 @@ from .ssh import (
     SUDO_SSH_ENV,
     SUDO_PROMPT,
     SUDO_READY,
+    sudo_error_path,
     _askpass_program,
     jump_hop_args,
     bare_host,
@@ -284,6 +285,11 @@ def connect(conn, log=None):
     cid, drive = conn["id"], conn["drive_letter"]
     state = probe_drive(drive)
     if state == "mounted":
+        other = foreign_drive(drive)
+        if other:
+            if log: log(f"[ERROR] {drive} is already used by {other}, so {conn['name']} "
+                        f"can't use it. Pick another drive letter in Edit.\n")
+            return False
         if log: log(f"[INFO] {drive} already mounted.\n")
         return True
     if state == "hung":
@@ -408,6 +414,10 @@ def connect(conn, log=None):
     if sudo_password:
         env.update({SUDO_ENV: conn["id"],
                     SUDO_SSH_ENV: os.path.join(sshfs_dir, "ssh.exe")})
+        try:
+            sudo_error_path(cid).unlink()
+        except OSError:
+            pass
     if conn.get("jump_host"):
         env.update({"SHELL": _askpass_program(),
                     JUMP_ENV: os.path.join(sshfs_dir, "ssh.exe")})
@@ -469,6 +479,21 @@ def connect(conn, log=None):
             if proc.poll() is not None:
                 time.sleep(0.3)  # let stream() show sshfs's last words
                 if log: log(f"[ERROR] sshfs exited (code {proc.returncode}).\n")
+                if log and use_sudo:
+                    said = ""
+                    if sudo_password:  # only the sudo helper leaves this file
+                        try:
+                            said = sudo_error_path(cid).read_text(encoding="utf-8").strip()
+                        except OSError:
+                            pass
+                    if "incorrect sudo password" in said.lower():
+                        log("[ERROR] Wrong sudo password. Fix it in Edit (Sudo Password).\n")
+                    elif said:
+                        log(f"[ERROR] sudo on the server said: {said}\n")
+                    elif not sudo_password:
+                        log("[HINT] Use sudo is on without a sudo password, so the server must "
+                            "allow sudo without one. If it doesn't, enter the Sudo Password "
+                            "in Edit.\n")
                 if log and conn.get("read_only"):
                     log("[HINT] Read-only mounts need OpenSSH's sftp-server on the server. "
                         "If it's missing, untick Read-only in Edit.\n")
@@ -500,8 +525,47 @@ def _find_sshfs_pids_for_drive(drive: str):
             pids.append(str(pid))
     return pids
 
+_DRIVE_KINDS = {2: "removable drive", 3: "local disk", 4: "network drive",
+                5: "CD drive", 6: "RAM disk"}
+
+def _drive_unc(drive):
+    buf = ctypes.create_unicode_buffer(1024)
+    size = ctypes.c_ulong(len(buf))
+    try:
+        if ctypes.windll.mpr.WNetGetConnectionW(drive[0] + ":", buf, ctypes.byref(size)) == 0:
+            return buf.value
+    except OSError:
+        pass
+    return ""
+
+def foreign_drive(drive):
+    """When the letter is taken by something that isn't one of our mounts (a USB
+    stick, a CD drive, another network share), return what it is, e.g.
+    "magicJack (CD drive)". None when the letter is free or is ours."""
+    if not letter_present(drive):
+        return None
+    root = drive[0].upper() + ":\\"
+    kind = ctypes.windll.kernel32.GetDriveTypeW(root)
+    unc = _drive_unc(drive) if kind == 4 else ""
+    if unc.lower().startswith("\\\\kamen\\") or _find_sshfs_pids_for_drive(drive):
+        return None
+    label = ""
+    if kind != 4:
+        buf = ctypes.create_unicode_buffer(261)
+        if ctypes.windll.kernel32.GetVolumeInformationW(root, buf, len(buf), None, None,
+                                                        None, None, 0):
+            label = buf.value
+    name = unc or label
+    what = _DRIVE_KINDS.get(kind, "another drive")
+    return f"{name} ({what})" if name else what
+
 def disconnect(conn, log=None):
     cid, drive = conn["id"], conn["drive_letter"]
+    other = foreign_drive(drive)
+    if other:
+        # Never unmount someone else's drive.
+        if log: log(f"[INFO] {drive} is {other}, not {conn['name']}. Leaving it alone.\n")
+        return True
     _save_format(drive, None)
     if log: log(f"[INFO] Disconnecting {drive}...\n")
 

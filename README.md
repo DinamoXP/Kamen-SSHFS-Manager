@@ -10,7 +10,7 @@ connections, 2FA support and automatic reconnect.
 **[Download the latest version](https://github.com/DinamoXP/Kamen-SSHFS-Manager/releases/latest/download/Kamen.SSHFS.Manager.exe)** (Windows 10/11, 64-bit) and see
 [Install](#install).
 
-![Kamen SSHFS Manager main window with three connections, two of them mounted](images/main.jpg?v=58a344f4)
+![Kamen SSHFS Manager main window with three connections, two of them mounted](images/main.jpg?v=4029e629)
 
 ## Install
 
@@ -57,7 +57,7 @@ From then on, updates come through **Update Now**.
 
 | New connection | Settings |
 |:---:|:---:|
-| ![Connection details form with Test Connection and Browse](images/new_connection.jpg?v=91343460) | ![Settings window with theme, startup, connections, drive, update and logging options](images/settings.jpg?v=e23f0f4e) |
+| ![Connection details form with Test Connection and Browse](images/new_connection.jpg?v=9376647e) | ![Settings window with theme, startup, connections, drive, update and logging options](images/settings.jpg?v=732860a1) |
 
 ## Features
 
@@ -65,7 +65,12 @@ From then on, updates come through **Update Now**.
 - Connect and disconnect per connection, or all at once with **All Drives**
   (**Connect All** / **Disconnect All**, with a progress window)
 - Hosts by name, IPv4 or IPv6 address (see [Host Addresses](#host-addresses))
-- Three auth methods: Password, Private Key, Ask Each Time
+- Three auth methods: Password, Private Key (with an optional saved
+  passphrase), Ask Each Time
+- **Use sudo** option to open a server's files as root
+  (see [Use sudo](#use-sudo))
+- Warns when another drive (USB stick, CD drive, share) has taken a
+  connection's drive letter, and offers a free one
 - **Key login...** sets up a login key on the server for you, so no password
   is needed after that (see [Key Login](#key-login))
 - Read/Write (default) or Read-only access per drive: a read-only drive's files
@@ -193,7 +198,7 @@ number of your network adapter (shown by `ipconfig`, e.g. `%12`).
 | Method        | Notes                                                        |
 |---------------|--------------------------------------------------------------|
 | Password      | Saved encrypted (DPAPI). Used for mounting and the SSH button. |
-| Private Key   | Path to your `.pem` or OpenSSH key file; a passphrase is asked in a popup |
+| Private Key   | Path to your `.pem` or OpenSSH key file. A key with a passphrase asks for it in a popup, or tick **Remember passphrase** to save it encrypted (DPAPI) |
 | Ask Each Time | A popup asks for the password on each connect; never saved   |
 
 ### Key Login
@@ -232,8 +237,25 @@ different, a popup asks for it. The card shows "via" and the jump host.
 | Hide dot files | Off | Files like `.bashrc` get Windows' hidden attribute |
 | No folder cache | Off | Always shows the newest files (e.g. changed by others); folders open a little slower |
 | Rename fix | Off | For older servers that refuse saving over an existing file by renaming |
+| Use sudo | Off | Opens the server's files as root (see below) |
 
 Anything else can still go in **Extra Args** (sshfs `-o` options).
+
+### Use sudo
+
+With **Use sudo** ticked, the server's SFTP program runs through `sudo`, so
+the drive can read and change every file on the server, including system
+files. Be careful: deleting or saving over the wrong file can break the
+server.
+
+- If sudo on the server asks for a password, enter it in **Sudo Password**
+  (shown when Use sudo is ticked). It's saved encrypted (DPAPI), separately
+  from the login password.
+- If sudo works without a password (`sudo -n true` succeeds on the server),
+  leave **Sudo Password** empty.
+- A wrong sudo password, or a server that doesn't allow it, is reported in
+  the debug log.
+- Works together with **Read-only**.
 
 ### Read-only Mounts
 
@@ -302,6 +324,15 @@ opening it hangs), the app notices within about 10 seconds:
 - A drive that is slow only because it's busy (a big copy over a slow
   connection) doesn't count: the app checks whether sshfs is still moving
   data, and only a drive that is silent *and* idle is treated as frozen.
+
+**When the drive letter is taken by something else**
+
+If another drive uses a connection's letter (a USB stick, a phone or modem
+that shows up as a CD drive, another network share), the card turns red and
+says what uses the letter, so it's never mistaken for your server. A popup
+offers to **use the next free letter**, to **wait** until the letter is free
+again (then the drive connects by itself), or to **choose a letter** in Edit.
+The app never disconnects or touches the other drive.
 
 Only one copy of the app runs at a time. Opening it again brings the running
 window to the front.

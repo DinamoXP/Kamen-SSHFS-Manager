@@ -57,7 +57,7 @@ jobs:
       - name: Build exe
         run: |
           python tools/make_version_info.py
-          pyinstaller --onefile --windowed --name "${{ env.APP_NAME }}" --icon icon.ico --add-data "version.json;." --exclude-module numpy --version-file version_info.txt kamen_sshfs_manager.py
+          pyinstaller --onefile --windowed --name "${{ env.APP_NAME }}" --icon icon.ico --add-data "version.json;." --add-data "icon.ico;." --exclude-module numpy --version-file version_info.txt kamen_sshfs_manager.py
 
       - name: Upload unsigned exe
         id: upload-unsigned
