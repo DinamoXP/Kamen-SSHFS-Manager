@@ -97,9 +97,11 @@ class SSHProbe:
         except ValueError:
             raise RuntimeError("Jump host can't be read - use user@host or user@host:port.")
 
+        key_passphrase = conn.get("passphrase", "")
         def login(user, host, port, sock=None, label=""):
             """One SSH login with this connection's settings. The jump host
             (label "jump host ...") uses the same login as the server."""
+            nonlocal key_passphrase
             client = paramiko.SSHClient()
             if conn.get("verify_host_key", False):
                 kh = Path.home() / ".ssh" / "known_hosts"
@@ -114,6 +116,21 @@ class SSHProbe:
                       allow_agent=False, look_for_keys=False)
             if conn.get("auth_type") == "key":
                 kw["key_filename"] = conn["key_path"]
+                # Check locally whether the key needs a passphrase before opening
+                # an SSH connection. This also works for connections via a jump host.
+                if not key_passphrase and prompt:
+                    try:
+                        paramiko.PKey.from_path(conn["key_path"])
+                    except paramiko.PasswordRequiredException:
+                        key_passphrase = prompt(
+                            "secret", f"Passphrase for private key {conn['key_path']}:")
+                        if key_passphrase is None:
+                            raise RuntimeError("Private key passphrase entry cancelled.")
+                    except (OSError, ValueError, paramiko.SSHException):
+                        # Let SSHClient report an invalid or unsupported key.
+                        pass
+                if key_passphrase:
+                    kw["passphrase"] = key_passphrase
             try:
                 try:
                     client.connect(**kw)  # key auth here; password auth below
@@ -328,10 +345,10 @@ def _find_ssh_client():
             return c
     return None
 
-# SSH_ASKPASS support: ssh runs this app as its password helper. ssh only
-# learns the connection id (via env); the helper reads the saved password from
-# the DPAPI-encrypted config itself, so the password never sits in the
-# environment or on a command line.
+# SSH_ASKPASS support: ssh runs this app as its password/passphrase helper.
+# ssh only learns the connection id (via env); the helper reads secrets from
+# the DPAPI-encrypted config, so they are never placed in the environment
+# or on a command line.
 ASKPASS_ENV = "KAMEN_SSHFS_ASKPASS_ID"
 
 def _askpass_program():
@@ -393,10 +410,11 @@ def open_ssh_terminal(conn):
     if conn.get("auth_type") == "key" and conn.get("key_path"):
         args += ["-i", conn["key_path"], "-o", "IdentitiesOnly=yes"]
     env = None
-    if conn.get("auth_type") == "password" and conn.get("password"):
-        # Fill in the saved password via SSH_ASKPASS. The helper uses it once;
-        # further prompts (wrong password, 2FA codes, new host keys) become
-        # popups. Other auth types prompt in the terminal as usual.
+    if ((conn.get("auth_type") == "password" and conn.get("password"))
+            or (conn.get("auth_type") == "key" and conn.get("passphrase"))):
+        # Use SSH_ASKPASS for a saved password or private key passphrase.
+        # Subsequent prompts become popups. Without a saved secret, the
+        # terminal continues to prompt normally.
         env = os.environ.copy()
         env.update({"SSH_ASKPASS": _askpass_program(),
                     "SSH_ASKPASS_REQUIRE": "force",
