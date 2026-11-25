@@ -343,7 +343,7 @@ how many are running, e.g. **Tunnels (2)**.
 
 | Tunnels | + Add Tunnel |
 |:---:|:---:|
-| ![Tunnels window with a web panel, a database and a SOCKS proxy](images/tunnels.jpg?v=4fc19683) | ![New Tunnel dialog with the Portainer preset](images/new_tunnel.jpg?v=1bfe399e) |
+| ![Tunnels window with a web panel, a database and a SOCKS proxy](images/tunnels.jpg?v=398ddbf4) | ![New Tunnel dialog with the Portainer preset](images/new_tunnel.jpg?v=a3d77d83) |
 
 | Type | Use it for | How to use it |
 |---|---|---|
