@@ -69,7 +69,7 @@ From then on, updates come through **Update Now**.
   passphrase), Ask Each Time
 - **Use sudo** option to open a server's files as root
   (see [Use sudo](#use-sudo))
-- Warns when another drive (USB stick, CD drive, share) has taken a
+- Warns when another stick or device has taken a
   connection's drive letter, and offers a free one
 - **Key login...** sets up a login key on the server for you, so no password
   is needed after that (see [Key Login](#key-login))
@@ -327,9 +327,8 @@ opening it hangs), the app notices within about 10 seconds:
 
 **When the drive letter is taken by something else**
 
-If another drive uses a connection's letter (a USB stick, a phone or modem
-that shows up as a CD drive, another network share), the card turns red and
-says what uses the letter, so it's never mistaken for your server. A popup
+If another stick or device uses a connection's drive letter, the card turns
+red and says what uses it, so it's never mistaken for your server. A popup
 offers to **use the next free letter**, to **wait** until the letter is free
 again (then the drive connects by itself), or to **choose a letter** in Edit.
 The app never disconnects or touches the other drive.
