@@ -355,6 +355,10 @@ how many are running, e.g. **Tunnels (2)**. Right-click it to open a tunnel
 straight away (**Open**, or **Copy address** for a database), without opening
 the Tunnels window. Open starts the tunnel first if needed.
 
+In the Tunnels window, each tunnel shows whether it's **Running**,
+**Stopped** or has an **Error** (with the reason on its own line), with
+**Start** / **Stop**, **Edit** and delete buttons.
+
 | Tunnels | + Add Tunnel |
 |:---:|:---:|
 | ![Tunnels window with a web panel, a database and a SOCKS proxy](images/tunnels.jpg?v=fc931af7) | ![New Tunnel dialog with the Portainer preset](images/new_tunnel.jpg?v=f2f95159) |
@@ -398,9 +402,12 @@ Each task (except to-dos) runs **only when you click Run**, **on a schedule**
 (every N minutes, daily or weekly at a time), **when a drive connects** or
 **when the app starts**. Schedules only run while the app is running.
 
-The list shows when each task last ran and whether it worked; click that line
-for the full output. A task that runs by itself and fails shows a tray
-notification. Tasks are saved in `tasks.json` in the app's settings folder.
+Each task shows when it last ran and whether it worked; click that badge for
+the full output. The header shows how many tasks failed, and the **All**,
+**To-dos** and **Automations** tabs filter the list. Ticking off a to-do
+doesn't move the list around; done to-dos go to the bottom the next time you
+open it. A task that runs by itself and fails shows a tray notification.
+Tasks are saved in `tasks.json` in the app's settings folder.
 
 ## Troubleshooting
 
@@ -409,9 +416,9 @@ notification. Tasks are saved in `tasks.json` in the app's settings folder.
 | `<path>: No such file or directory`            | Remote path doesn't exist - Edit → Test Connection → Browse… |
 | `read: Connection reset by peer`               | ssh quit before mounting - run Test Connection for the real reason (password, host key, network) |
 | An AI tool or editor says the drive's folder can't be reached, though Explorer opens it | Drives mounted before v1.9.1 lack the network-share registration some tools need: use **All Drives > Disconnect All**, then **Connect All** |
-| `sshfs.exe not found`                          | Install WinFsp, then SSHFS-Win                  |
+| `sshfs.exe not found`                          | Click **Install for me** in the banner (or install WinFsp, then SSHFS-Win, by hand) |
 | `[HUNG] X: not responding since ...`           | The drive's sshfs stopped answering. Click **Restart** on its card, or **Kill** to remove the drive |
-| Banner: WinFsp / SSHFS-Win not installed       | Use the Get… buttons, install, then click Re-check |
+| Banner: WinFsp / SSHFS-Win not installed       | Click **Install for me** and allow the Windows permission prompts. If it can't install them (no internet, or permission refused), click **Try again** or **Open download pages** |
 
 ## Building the .exe
 
@@ -426,7 +433,7 @@ To build the same exe yourself:
 ```
 pip install -r requirements.txt pyinstaller==6.17.0
 python tools/make_version_info.py
-pyinstaller --onefile --windowed --name "Kamen SSHFS Manager" --icon icon.ico --add-data "version.json;." --exclude-module numpy --version-file version_info.txt kamen_sshfs_manager.py
+pyinstaller --onefile --windowed --name "Kamen SSHFS Manager" --icon icon.ico --add-data "version.json;." --add-data "icon.ico;." --exclude-module numpy --version-file version_info.txt kamen_sshfs_manager.py
 ```
 
 The exe is written to `dist\Kamen SSHFS Manager.exe`.
@@ -436,13 +443,13 @@ every push and before every release build; a release whose tests fail gets no
 `SHA256SUMS.txt`, so the app's **Update Now** won't offer it.
 
 `kamen_sshfs_manager.py` only starts the app; the code is in the `kamen/`
-package (`config`, `winutil`, `ssh`, `mounts`, `ui`), which PyInstaller picks up
-on its own.
+package (`config`, `winutil`, `ssh`, `mounts`, `tasks`, `update`, `ui`, and
+the `ui_tasks` / `ui_tunnels` windows), which PyInstaller picks up on its own.
 
 - `tools/make_version_info.py` writes `version_info.txt` from `version.json`,
   so the exe's Windows properties show the product name and version.
 - `--add-data "version.json;."` bundles the version file, so the app shows the
-  right version.
+  right version, and `--add-data "icon.ico;."` the icon used for the logo.
 - `--exclude-module numpy` leaves out numpy, which Pillow pulls in but the app
   doesn't use (saves ~12 MB).
 
@@ -504,6 +511,8 @@ anywhere. It connects to:
   **Check for updates when the app starts** is on (the default). Nothing is
   sent except a normal web request. Turn it off in Settings to stop this.
 - GitHub, to download the new exe, only when you click **Update Now**.
+- winget or the official WinFsp and SSHFS-Win releases on GitHub, only when
+  you click **Install for me**.
 
 Download pages open in your browser only when you click a download button.
 
