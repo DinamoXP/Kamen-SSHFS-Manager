@@ -40,6 +40,7 @@ from .mounts import (
     connect,
     disconnect,
     foreign_drive,
+    install_requirement,
     missing_requirements,
     mount_format,
     mount_option,
@@ -58,6 +59,23 @@ from .ssh import (
     parse_jump,
     setup_key_login,
 )
+from .tasks import (
+    COPY_MODES,
+    DAYS,
+    TRIGGERS as TASK_TRIGGERS,
+    TYPES as TASK_TYPES,
+    describe_task,
+    describe_when,
+    drive_of,
+    load_tasks,
+    new_task,
+    next_run,
+    run_command,
+    run_copy,
+    run_program,
+    save_tasks,
+    valid_time,
+)
 from .winutil import (
     _k32,
     drive_space,
@@ -75,8 +93,13 @@ ACCENT = ACCENT_H = SSH_BG = SSH_H = SUCCESS = SUCCESS_H = DANGER = DANGER_H = W
 
 EXIT_BG = EXIT_H = TRAY_BG = TRAY_H = BANNER_BG = BANNER_FG = LOG_BG = LOG_FG = ""
 
+_THEMED = []  # the other ui_* modules; they get the same colours
+
 def apply_theme(name):
-    globals().update(THEMES.get(name, THEMES["dark"]))
+    colours = THEMES.get(name, THEMES["dark"])
+    globals().update(colours)
+    for m in _THEMED:
+        vars(m).update(colours)
 
 apply_theme("dark")
 
@@ -212,6 +235,50 @@ def _tile_image(size, fill, outline, radius=12):
         _tiles[key] = ImageTk.PhotoImage(img.resize((size, size), Image.LANCZOS))
     return _tiles[key]
 
+def _usage_color(used):
+    """Green while there's plenty of room, through yellow, to red when nearly full."""
+    f = min(1.0, max(0.0, (used - 0.5) / 0.45))  # 50% used or less is green, 95% is red
+    return _blend(SUCCESS, WARNING, f * 2) if f < 0.5 else _blend(WARNING, DANGER, f * 2 - 1)
+
+def _bar_image(width, height, used, color, track):
+    """Rounded usage bar, drawn large and scaled down for smooth ends."""
+    from PIL import Image, ImageDraw, ImageTk
+    ss = 8
+    W, H = width * ss, height * ss
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle((0, 0, W - 1, H - 1), radius=H // 2, fill=track)
+    fill = round(W * min(1.0, max(0.0, used)))
+    if fill:
+        d.rounded_rectangle((0, 0, max(fill, H) - 1, H - 1), radius=H // 2, fill=color)
+    return ImageTk.PhotoImage(img.resize((width, height), Image.LANCZOS))
+
+def _tank_image(size, fill, outline, used, color, radius=12):
+    """Drive tile that fills up from the bottom like a tank: the level is how
+    full the drive is, in the usage colour."""
+    level = round(min(1.0, max(0.0, used)) * 100)
+    key = ("tank", size, fill, outline, level, color, radius)
+    if key not in _tiles:
+        from PIL import Image, ImageChops, ImageDraw, ImageTk
+        ss = 8
+        S = size * ss
+        box = (ss // 2, ss // 2, S - 1 - ss // 2, S - 1 - ss // 2)
+        img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+        ImageDraw.Draw(img).rounded_rectangle(box, radius=radius * ss, fill=fill)
+        if level:
+            mask = Image.new("L", (S, S), 0)
+            ImageDraw.Draw(mask).rounded_rectangle(box, radius=radius * ss, fill=255)
+            top = round(box[3] - (box[3] - box[1]) * level / 100)
+            band = Image.new("L", (S, S), 0)
+            ImageDraw.Draw(band).rectangle((0, top, S, S), fill=255)
+            liquid = Image.new("RGBA", (S, S), _blend(fill, color, 0.45))
+            ImageDraw.Draw(liquid).rectangle((0, top, S, top + 2 * ss), fill=_blend(fill, color, 0.8))
+            img.paste(liquid, (0, 0), ImageChops.multiply(mask, band))
+        ImageDraw.Draw(img).rounded_rectangle(box, radius=radius * ss, outline=outline,
+                                              width=round(1.5 * ss))
+        _tiles[key] = ImageTk.PhotoImage(img.resize((size, size), Image.LANCZOS))
+    return _tiles[key]
+
 def _draw_logo(size: int, ss: int = 1):
     """Fallback logo drawn with shapes only, for when icon.ico is missing."""
     from PIL import Image, ImageDraw
@@ -256,6 +323,12 @@ def mk_btn(parent, text, cmd, bg=None, fg=None, width=None, active_fg=None):
     if fg is None: fg = FG if bg == BG_INPUT else "white"
     hov_map = {BG_INPUT: BORDER, ACCENT: ACCENT_H, DANGER: DANGER_H, SUCCESS: SUCCESS_H,
                WARNING: WARNING_H, EXIT_BG: EXIT_H, TRAY_BG: TRAY_H, SSH_BG: SSH_H}
+    # Blue and green buttons: the darker shade normally, the bright one on hover
+    # (bright all the time was too loud).
+    calm = {ACCENT: ACCENT_H, SUCCESS: SUCCESS_H}
+    for bright, dark in calm.items():
+        hov_map[dark] = bright
+    bg = calm.get(bg, bg)
     afg = active_fg if active_fg else fg
     kw = dict(text=text, command=cmd, bg=bg, fg=fg, relief="flat", bd=0,
               cursor="hand2", font=FONT, padx=10, pady=4,
@@ -268,6 +341,7 @@ def mk_btn(parent, text, cmd, bg=None, fg=None, width=None, active_fg=None):
     orig_configure = b.configure
     def patched_configure(*args, **kwargs):
         if "bg" in kwargs:
+            kwargs["bg"] = calm.get(kwargs["bg"], kwargs["bg"])
             b._orig_bg = kwargs["bg"]
             kwargs["activebackground"] = hov_map.get(kwargs["bg"], BORDER)
         if "fg" in kwargs:
@@ -297,6 +371,45 @@ def mk_entry(parent, show=None, width=28):
                  relief="flat", bd=4, font=FONT, width=width)
     if show: e.configure(show=show)
     return e
+
+_eyes = {}
+
+def _eye_image(color, crossed, size=16):
+    """Eye icon (crossed out = hidden), drawn 8x larger and scaled down."""
+    key = (color, crossed, size)
+    if key not in _eyes:
+        from PIL import Image, ImageDraw, ImageTk
+        ss = 8
+        S = size * ss
+        img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        w = round(1.6 * ss)
+        box = (S * 0.06, S * 0.22, S * 0.94, S * 0.78)
+        d.arc((box[0], S * 0.22, box[2], S * 1.10), 200, 340, fill=color, width=w)
+        d.arc((box[0], S * -0.10, box[2], S * 0.78), 20, 160, fill=color, width=w)
+        r = S * 0.15
+        d.ellipse((S / 2 - r, S / 2 - r, S / 2 + r, S / 2 + r), fill=color)
+        if crossed:
+            d.line((S * 0.16, S * 0.86, S * 0.84, S * 0.14), fill=color, width=w)
+        _eyes[key] = ImageTk.PhotoImage(img.resize((size, size), Image.LANCZOS))
+    return _eyes[key]
+
+def add_reveal(entry, mask="●"):
+    """Eye button inside the right end of a password field: shows or hides
+    what was typed."""
+    btn = tk.Label(entry, bg=BG_INPUT, cursor="hand2", bd=0)
+    def draw(hover=False):
+        btn.configure(image=_eye_image(FG if hover else FG_MUTED, entry.cget("show") != ""))
+    def toggle(_=None):
+        entry.configure(show="" if entry.cget("show") else mask)
+        draw(True)
+    btn.bind("<Button-1>", toggle)
+    btn.bind("<Enter>", lambda e: draw(True))
+    btn.bind("<Leave>", lambda e: draw(False))
+    draw()
+    btn.place(relx=1.0, rely=0.5, anchor="e", x=-4)
+    Tooltip(btn, "Show or hide what you type")
+    return btn
 
 def mk_label(parent, text, fg=None, font=FONT, **kw):
     bg = parent.cget("bg")
@@ -342,6 +455,8 @@ class PromptDialog(tk.Toplevel):
         else:
             self.entry = mk_entry(self, show="●" if kind == "secret" else None, width=40)
             self.entry.pack(fill="x", padx=20, pady=(0, 4))
+            if kind == "secret":
+                add_reveal(self.entry)
             self.entry.bind("<Return>", lambda e: self._ok())
 
         bar = tk.Frame(self, bg=BG)
@@ -404,14 +519,21 @@ class Tooltip:
 
     def _show(self):
         self._job = None
-        if self._tip or not self.widget.winfo_exists():
+        build = getattr(self, "build", None)  # optional: fills the tip with widgets
+        if self._tip or not (self.text or build) or not self.widget.winfo_exists():
             return
         tip = self._tip = tk.Toplevel(self.widget)
         tip.wm_overrideredirect(True)  # no title bar
         tip.attributes("-topmost", True)
-        tk.Label(tip, text=self.text, bg=BG_CARD, fg=FG, font=FONT_SMALL,
-                 justify="left", padx=8, pady=5,
-                 highlightthickness=1, highlightbackground=BORDER).pack()
+        if build:
+            box = tk.Frame(tip, bg=BG_CARD, padx=10, pady=8,
+                           highlightthickness=1, highlightbackground=BORDER)
+            box.pack()
+            build(box)
+        else:
+            tk.Label(tip, text=self.text, bg=BG_CARD, fg=FG, font=FONT_SMALL,
+                     justify="left", padx=8, pady=5,
+                     highlightthickness=1, highlightbackground=BORDER).pack()
         tip.update_idletasks()
         # Above the pointer and kept on screen (the version label sits at the
         # bottom-right of the window, so "below" would often be off-screen).
@@ -536,14 +658,23 @@ class Card(tk.Frame):
         self.lbl_host = mk_label(host_row, self._host_part(), fg=FG_MUTED,
                                  font=FONT_SMALL, anchor="w")
         self.lbl_host.pack(side="left")
+        # While connected: "73% used" in the usage colour; hover it (or the tile)
+        # for used / free / total space and ping
+        self.lbl_sep = mk_label(host_row, "", fg=FG_MUTED, font=FONT_SMALL)
+        self.lbl_sep.pack(side="left")
+        self.lbl_pct = mk_label(host_row, "", font=FONT_SMALL)
+        self.lbl_pct.pack(side="left")
+        self._tile_tip = Tooltip(self.cv, "", delay=300)
+        self._pct_tip = Tooltip(self.lbl_pct, "", delay=150)
         self.lbl_space = mk_label(host_row, "", fg=FG_MUTED, font=FONT_SMALL, anchor="w")
-        self.lbl_space.pack(side="left")  # "  ·  120 GB free" while connected
+        self.lbl_space.pack(side="left")
         self.lbl_drive = mk_label(host_row, "", fg=WARNING, font=FONT_SMALL, anchor="w")
         self.lbl_drive.pack(side="left", padx=(8, 0))  # "not responding" when hung
 
         mk_btn(bf, "SSH", self._ssh, bg=SSH_BG).pack(side="left", padx=3)
         self.btn_tun = mk_btn(bf, "Tunnels", lambda: self.mgr.open_tunnels(self.conn["id"]))
         self.btn_tun.pack(side="left", padx=3)
+        self.btn_tun.bind("<Button-3>", lambda e: self.mgr.tunnel_menu(self.conn["id"], self.btn_tun))
         self.update_tunnel_count()
         self.btn_con = mk_btn(bf, "Connect", self._toggle, bg=ACCENT, fg="white")
         # Keep text white even when disabled (e.g. during "Connecting...")
@@ -598,12 +729,39 @@ class Card(tk.Frame):
 
     def set_space(self, space, ping=None):
         text = ""
-        if self._status == "connected":
-            if space:
-                free, total = space
-                text += f"  ·  {human_size(free)} free of {human_size(total)}"
+        connected = self._status == "connected"
+        if connected and space and space[1]:
+            free, total = space
+            used = 1 - free / total
+            color = _usage_color(used)
+            self.cv.itemconfig(self._tile, image=_tank_image(
+                self.TILE, _blend(BG_CARD, SUCCESS, 0.08), _blend(BG_CARD, SUCCESS, 0.6), used, color))
+            self.cv.itemconfig(self._tile_text, fill=FG)
+            self.lbl_sep.configure(text="  ·  ")
+            self.lbl_pct.configure(text=f"{used:.0%} used", fg=color)
+            rows = [("Used", f"{human_size(total - free)}  ({used:.0%})", color),
+                    ("Free", human_size(free), FG), ("Total", human_size(total), FG)]
             if ping is not None:
-                text += f"  ·  {ping} ms" if ping else "  ·  <1 ms"
+                rows.append(("Ping", f"{ping} ms" if ping else "<1 ms", FG))
+            def build(box, used=used, color=color, rows=rows):
+                mk_label(box, f"{self.conn['drive_letter']}\\  {self.conn['name']}",
+                         font=FONT_BOLD).grid(row=0, column=0, columnspan=2, sticky="w")
+                box._bar = _bar_image(180, 6, used, color, _blend(BG_CARD, FG_MUTED, 0.25))
+                tk.Label(box, image=box._bar, bg=BG_CARD, bd=0).grid(
+                    row=1, column=0, columnspan=2, sticky="w", pady=(6, 6))
+                for i, (k, v, c) in enumerate(rows, 2):
+                    mk_label(box, k, fg=FG_MUTED, font=FONT_SMALL).grid(
+                        row=i, column=0, sticky="w", padx=(0, 16))
+                    mk_label(box, v, fg=c, font=("Segoe UI", 9, "bold")).grid(
+                        row=i, column=1, sticky="e")
+            self._tile_tip.build = self._pct_tip.build = build
+        else:
+            self.lbl_sep.configure(text="")
+            self.lbl_pct.configure(text="")
+            self._tile_tip.build = self._pct_tip.build = None
+            # No space reading: still show the ping on the line
+            if connected and ping is not None:
+                text = f"  ·  {ping} ms" if ping else "  ·  <1 ms"
         self.lbl_space.configure(text=text)
         self.mgr.fit_width()
 
@@ -892,6 +1050,7 @@ class EditDialog(tk.Toplevel):
         self.lbl_pw = mk_label(form, "Password", fg=FG_MUTED, font=FONT_SMALL)
         self.lbl_pw.grid(row=8, column=0, sticky="e", padx=(14,8), pady=5)
         self.e_pass = mk_entry(form, show="●")
+        add_reveal(self.e_pass)
         self.e_pass.grid(row=8, column=1, sticky="ew", padx=(0,14), pady=5)
         self.e_pass.insert(0, self.conn.get("password",""))
 
@@ -908,41 +1067,45 @@ class EditDialog(tk.Toplevel):
         self._kf = kf
 
         # A private key may be encrypted. Remembering the passphrase is optional.
-        pp = tk.Frame(kf, bg=BG)
-        pp.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
-        mk_label(pp, "Passphrase", fg=FG_MUTED, font=FONT_SMALL).pack(side="left")
-        self.e_passphrase = mk_entry(pp, width=15, show="●")
-        self.e_passphrase.pack(side="left", padx=(6, 8))
+        self.lbl_pp = mk_label(form, "Passphrase", fg=FG_MUTED, font=FONT_SMALL)
+        self.lbl_pp.grid(row=10, column=0, sticky="e", padx=(14, 8), pady=5)
+        pp = tk.Frame(form, bg=BG)
+        pp.grid(row=10, column=1, sticky="ew", padx=(0, 14), pady=5)
+        pp.columnconfigure(0, weight=1)
+        self._pp = pp
+        self.e_passphrase = mk_entry(pp, width=20, show="●")
+        add_reveal(self.e_passphrase)
+        self.e_passphrase.grid(row=0, column=0, sticky="ew")
         self.e_passphrase.insert(0, self.conn.get("passphrase", ""))
         self.remember_passphrase_var = tk.BooleanVar(
             value=bool(self.conn.get("passphrase")))
         remember_cb = tk.Checkbutton(
-            pp, text="Remember passphrase", variable=self.remember_passphrase_var,
+            pp, text="Remember", variable=self.remember_passphrase_var,
             bg=BG, fg=FG, selectcolor=BG_INPUT,
             activebackground=BG, activeforeground=FG, font=FONT_SMALL)
-        remember_cb.pack(side="left")
+        remember_cb.grid(row=0, column=1, padx=(8, 0))
         Tooltip(remember_cb, "Stored encrypted with Windows DPAPI for this Windows user.\n"
                              "Leave unchecked to use the passphrase only for this test.")
 
         # Extra args
-        lbl("Extra Args", 10)
-        self.e_extra = entry(10)
+        lbl("Extra Args", 11)
+        self.e_extra = entry(11)
         self.e_extra.insert(0, self.conn.get("extra_args",""))
 
         # Optional jump host (ProxyJump)
-        lbl("Jump Host", 11)
-        self.e_jump = entry(11)
+        lbl("Jump Host", 12)
+        self.e_jump = entry(12)
         self.e_jump.insert(0, self.conn.get("jump_host", ""))
         mk_label(form, "Optional: a server to connect through (user@host:port), with the "
                  "same login.",
                  fg=FG_MUTED, font=FONT_SMALL, wraplength=430, justify="left").grid(
-            row=12, column=0, columnspan=2, sticky="w", padx=(14, 14), pady=(0, 4))
+            row=13, column=0, columnspan=2, sticky="w", padx=(14, 14), pady=(0, 4))
 
         # Read/write (default) or read-only
-        lbl("Access", 13)
+        lbl("Access", 14)
         self.ro_var = tk.BooleanVar(value=self.conn.get("read_only", False))
         rf = tk.Frame(form, bg=BG)
-        rf.grid(row=13, column=1, sticky="w", pady=5)
+        rf.grid(row=14, column=1, sticky="w", pady=5)
         for v, t in [(False, "Read/Write"), (True, "Read-only")]:
             tk.Radiobutton(rf, text=t, variable=self.ro_var, value=v,
                            bg=BG, fg=FG, selectcolor=BG_INPUT,
@@ -951,9 +1114,9 @@ class EditDialog(tk.Toplevel):
 
         # Mount options (sshfs settings that used to need Extra Args)
         mk_label(form, "Options", fg=FG_MUTED, font=FONT_SMALL).grid(
-            row=14, column=0, sticky="ne", padx=(14, 8), pady=(7, 5))
+            row=15, column=0, sticky="ne", padx=(14, 8), pady=(7, 5))
         of = tk.Frame(form, bg=BG)
-        of.grid(row=14, column=1, sticky="w", pady=5)
+        of.grid(row=15, column=1, sticky="w", pady=5)
         self.opt_vars = {}
         for i, (key, text, _, _, tip) in enumerate(MOUNT_OPTIONS):
             var = self.opt_vars[key] = tk.BooleanVar(value=mount_option(self.conn, key))
@@ -967,10 +1130,11 @@ class EditDialog(tk.Toplevel):
         # Separate sudo password (not the SSH password or key passphrase).
         self.lbl_sudo_password = mk_label(
             form, "Sudo Password", fg=FG_MUTED, font=FONT_SMALL)
-        self.lbl_sudo_password.grid(row=15, column=0, sticky="e",
+        self.lbl_sudo_password.grid(row=16, column=0, sticky="e",
                                     padx=(14, 8), pady=5)
         self.e_sudo_password = mk_entry(form, show="●")
-        self.e_sudo_password.grid(row=15, column=1, sticky="ew",
+        add_reveal(self.e_sudo_password)
+        self.e_sudo_password.grid(row=16, column=1, sticky="ew",
                                   padx=(0, 14), pady=5)
         self.e_sudo_password.insert(0, self.conn.get("sudo_password", ""))
         Tooltip(self.e_sudo_password,
@@ -983,7 +1147,7 @@ class EditDialog(tk.Toplevel):
         tk.Checkbutton(form, text="Connect automatically when the app starts", variable=self.auto_var,
                        bg=BG, fg=FG, selectcolor=BG_INPUT,
                        activebackground=BG, activeforeground=FG,
-                       font=FONT).grid(row=16, column=1, sticky="w", pady=(8, 0))
+                       font=FONT).grid(row=17, column=1, sticky="w", pady=(8, 0))
 
         # Verify host key
         self.verify_var = tk.BooleanVar(value=self.conn.get("verify_host_key", False))
@@ -991,7 +1155,7 @@ class EditDialog(tk.Toplevel):
                        variable=self.verify_var,
                        bg=BG, fg=FG, selectcolor=BG_INPUT,
                        activebackground=BG, activeforeground=FG,
-                       font=FONT).grid(row=17, column=1, sticky="w", pady=(0, 8))
+                       font=FONT).grid(row=18, column=1, sticky="w", pady=(0, 8))
 
         self._auth_change()
 
@@ -1035,13 +1199,17 @@ class EditDialog(tk.Toplevel):
             self.lbl_pw.grid(row=8, column=0, sticky="e", padx=(14,8), pady=5)
             self.e_pass.grid(row=8, column=1, sticky="ew", padx=(0,14), pady=5)
             self.lbl_key.grid_remove(); self._kf.grid_remove()
+            self.lbl_pp.grid_remove(); self._pp.grid_remove()
         elif auth == "key":
             self.lbl_key.grid(row=9, column=0, sticky="e", padx=(14,8), pady=5)
             self._kf.grid(row=9, column=1, sticky="ew", padx=(0,14), pady=5)
+            self.lbl_pp.grid(row=10, column=0, sticky="e", padx=(14,8), pady=5)
+            self._pp.grid(row=10, column=1, sticky="ew", padx=(0,14), pady=5)
             self.lbl_pw.grid_remove(); self.e_pass.grid_remove()
         else:
             self.lbl_pw.grid_remove();  self.e_pass.grid_remove()
             self.lbl_key.grid_remove(); self._kf.grid_remove()
+            self.lbl_pp.grid_remove(); self._pp.grid_remove()
 
     def _browse(self):
         p = filedialog.askopenfilename(title="Select Private Key",
@@ -1384,313 +1552,107 @@ class RemoteBrowser(tk.Toplevel):
             threading.Thread(target=self._probe.close, daemon=True).start()
         self.destroy()
 
-class TunnelDialog(tk.Toplevel):
-    """Add or edit one tunnel. Calls on_save(tunnel_dict)."""
+def mk_pill(parent, text, color, bg=None):
+    """Small coloured badge."""
+    base = bg or parent.cget("bg")
+    return tk.Label(parent, text=text, bg=_blend(base, color, 0.16), fg=color,
+                    font=FONT_SMALL, padx=8, pady=1)
 
-    def __init__(self, parent, tunnel, used_ports, on_save):
-        super().__init__(parent)
-        self.withdraw()
-        self.t, self.used_ports, self.on_save = dict(tunnel), used_ports, on_save
-        self.title("Edit Tunnel" if tunnel.get("name") else "New Tunnel")
-        self.configure(bg=BG)
-        self.resizable(False, False)
-        self.transient(parent)
+class RequirementsDialog(tk.Toplevel):
+    """WinFsp / SSHFS-Win missing: install them with winget (Windows asks for
+    permission for each), or open the download pages."""
 
-        form = tk.Frame(self, bg=BG)
-        form.pack(fill="both", expand=True, padx=8, pady=(12, 0))
-        form.columnconfigure(1, weight=1)
-        radio = dict(bg=BG, fg=FG, selectcolor=BG_INPUT, activebackground=BG,
-                     activeforeground=FG, font=FONT)
-
-        def lbl(text, r):
-            w = mk_label(form, text, fg=FG_MUTED, font=FONT_SMALL)
-            w.grid(row=r, column=0, sticky="e", padx=(10, 8), pady=5)
-            return w
-
-        lbl("Preset", 0)
-        self.preset_var = tk.StringVar(value="Custom")
-        cb = ttk.Combobox(form, textvariable=self.preset_var, state="readonly", width=22,
-                          values=[p[0] for p in TUNNEL_PRESETS] + ["Custom"])
-        cb.grid(row=0, column=1, sticky="w", padx=(0, 14), pady=5)
-        cb.bind("<<ComboboxSelected>>", lambda e: self._apply_preset())
-
-        lbl("Name", 1)
-        self.e_name = mk_entry(form, width=30)
-        self.e_name.grid(row=1, column=1, sticky="ew", padx=(0, 14), pady=5)
-        self.e_name.insert(0, self.t.get("name", ""))
-
-        lbl("Type", 2)
-        self.type_var = tk.StringVar(value=self.t.get("type", "local"))
-        tf = tk.Frame(form, bg=BG)
-        tf.grid(row=2, column=1, sticky="w", pady=5)
-        for value, text in (("local", "Web panel / database"), ("socks", "SOCKS proxy"),
-                            ("remote", "Remote")):
-            tk.Radiobutton(tf, text=text, variable=self.type_var, value=value,
-                           command=self._type_change, **radio).pack(side="left", padx=(0, 10))
-
-        # A remote tunnel uses the same three fields: the port it opens on the
-        # server, then the target on this side (see _type_change)
-        remote = self.t.get("type") == "remote"
-        self.lbl_lport = lbl("Local port", 3)
-        self.e_lport = mk_entry(form, width=8)
-        self.e_lport.grid(row=3, column=1, sticky="w", padx=(0, 14), pady=5)
-        self.e_lport.insert(0, str(self.t.get("remote_port" if remote else "local_port", 8080)))
-
-        self.lbl_rhost = lbl("Target host", 4)
-        self.e_rhost = mk_entry(form, width=30)
-        self.e_rhost.grid(row=4, column=1, sticky="ew", padx=(0, 14), pady=5)
-        self.e_rhost.insert(0, self.t.get("local_host" if remote else "remote_host", "127.0.0.1"))
-        self.lbl_rport = lbl("Target port", 5)
-        self.e_rport = mk_entry(form, width=8)
-        self.e_rport.grid(row=5, column=1, sticky="w", padx=(0, 14), pady=5)
-        self.e_rport.insert(0, str(self.t.get("local_port" if remote else "remote_port") or 80))
-
-        self.note = tk.Label(form, text="", bg=BG, fg=FG_MUTED, font=("Segoe UI", 8),
-                             justify="left", anchor="w", wraplength=360)
-        self.note.grid(row=6, column=0, columnspan=2, sticky="w", padx=(10, 14), pady=(0, 6))
-
-        self.auto_start = tk.BooleanVar(value=self.t.get("auto_start", False))
-        tk.Checkbutton(form, text="Start when the app starts", variable=self.auto_start,
-                       **radio).grid(row=7, column=1, sticky="w")
-        self.auto_restart = tk.BooleanVar(value=self.t.get("auto_restart", True))
-        tk.Checkbutton(form, text="Restart if it drops", variable=self.auto_restart,
-                       **radio).grid(row=8, column=1, sticky="w")
-
-        bar = tk.Frame(self, bg=BG)
-        bar.pack(fill="x", padx=14, pady=14)
-        mk_btn(bar, "Save", self._save, bg=ACCENT).pack(side="right", padx=(6, 0))
-        mk_btn(bar, "Cancel", self.destroy).pack(side="right")
-        self._type_change()
-        self.minsize(420, 0)
-        show_centered(self, parent)
-        self.e_name.focus_set()
-
-    def _apply_preset(self):
-        for name, kind, lport, rport in TUNNEL_PRESETS:
-            if name == self.preset_var.get():
-                self.e_name.delete(0, "end")
-                self.e_name.insert(0, name)
-                self.type_var.set(kind)
-                self.e_lport.delete(0, "end")
-                self.e_lport.insert(0, str(lport))
-                if rport:
-                    self.e_rport.delete(0, "end")
-                    self.e_rport.insert(0, str(rport))
-                    self.e_rhost.delete(0, "end")
-                    self.e_rhost.insert(0, "127.0.0.1")
-                self._type_change()
-
-    def _type_change(self):
-        kind = self.type_var.get()
-        socks = kind == "socks"
-        for w in (self.lbl_rhost, self.e_rhost, self.lbl_rport, self.e_rport):
-            w.grid_remove() if socks else w.grid()
-        self.lbl_lport.configure(text="Server port" if kind == "remote" else "Local port")
-        if kind == "remote":
-            self.note.configure(text=(
-                "The server opens this port (on its own 127.0.0.1) and passes connections "
-                "to the target, as seen from this PC: 127.0.0.1 = this PC, or another "
-                "machine on your network. Example: let the server reach a web project "
-                "running on this PC."))
-            return
-        self.note.configure(text=(
-            "Point your browser's proxy settings at SOCKS5 127.0.0.1 and the local "
-            "port. Its traffic then goes out through the server."
-            if socks else
-            "Where the tunnel leads, as seen from the server. 127.0.0.1 = the server "
-            "itself; or enter another machine the server can reach. Open it on this PC "
-            "at 127.0.0.1 and the local port."))
-
-    def _port(self, entry, label):
-        try:
-            v = int(entry.get().strip())
-            if 1 <= v <= 65535:
-                return v
-        except ValueError:
-            pass
-        messagebox.showerror("Tunnel", f"{label} must be a number from 1 to 65535.",
-                             parent=self)
-        return None
-
-    def _save(self):
-        name = self.e_name.get().strip()
-        if not name:
-            messagebox.showerror("Tunnel", "Give the tunnel a name.", parent=self)
-            return
-        kind = self.type_var.get()
-        if kind == "remote":
-            sport = self._port(self.e_lport, "Server port")
-            tport = self._port(self.e_rport, "Target port") if sport else None
-            if tport is None:
-                return
-            self.t.pop("remote_host", None)
-            self.t.update(name=name, type="remote", remote_port=sport, local_port=tport,
-                          local_host=self.e_rhost.get().strip() or "127.0.0.1",
-                          auto_start=self.auto_start.get(),
-                          auto_restart=self.auto_restart.get())
-            self.t.setdefault("id", str(int(time.time() * 1000)))
-            self.destroy()
-            self.on_save(self.t)
-            return
-        self.t.pop("local_host", None)
-        lport = self._port(self.e_lport, "Local port")
-        if lport is None:
-            return
-        if lport in self.used_ports:
-            messagebox.showerror("Tunnel", f"Local port {lport} is already used by "
-                                 "another tunnel.", parent=self)
-            return
-        self.t.update(name=name, type=self.type_var.get(), local_port=lport,
-                      auto_start=self.auto_start.get(), auto_restart=self.auto_restart.get())
-        if self.t["type"] == "local":
-            rport = self._port(self.e_rport, "Target port")
-            if rport is None:
-                return
-            self.t.update(remote_host=self.e_rhost.get().strip() or "127.0.0.1",
-                          remote_port=rport)
-        self.t.setdefault("id", str(int(time.time() * 1000)))
-        self.destroy()
-        self.on_save(self.t)
-
-class TunnelsWindow(tk.Toplevel):
-    """Lists one connection's tunnels with Start/Stop, Open, Edit and Delete."""
-
-    def __init__(self, app, cid):
+    def __init__(self, app, missing):
         super().__init__(app)
         self.withdraw()
-        self.app, self.cid = app, cid
-        conn = app.find_conn(cid)
-        self.title(f"Tunnels - {conn['name']}")
+        self.app, self.missing = app, missing
+        self.title("Missing Requirements")
         self.configure(bg=BG)
+        self.resizable(False, False)
         self.transient(app)
-        self.protocol("WM_DELETE_WINDOW", self._close)
-
-        mk_label(self, "Tunnels", font=FONT_LARGE).pack(anchor="w", padx=16, pady=(14, 0))
-        mk_label(self, _conn_label(conn), fg=FG_MUTED, font=FONT_SMALL).pack(anchor="w", padx=16)
-        self.rows = tk.Frame(self, bg=BG)
-        self.rows.pack(fill="both", expand=True, padx=16, pady=10)
-        self.rows.columnconfigure(1, weight=1)
-
+        names = " and ".join(n for n, _ in missing)
+        mk_label(self, f"{names} {'is' if len(missing) == 1 else 'are'} needed",
+                 font=FONT_LARGE).pack(anchor="w", padx=24, pady=(16, 6))
+        mk_label(self, "This app mounts drives with WinFsp and SSHFS-Win. Install for me "
+                 "downloads and installs both for you. Windows asks for permission for "
+                 "each, because WinFsp is a driver.",
+                 fg=FG_MUTED, font=FONT_SMALL, wraplength=440, justify="left").pack(
+            anchor="w", padx=24)
+        box = tk.Frame(self, bg=BG)
+        box.pack(fill="x", padx=24, pady=(12, 0))
+        self._status = {}
+        for i, (name, url) in enumerate(missing, 1):
+            mk_label(box, f"{i}.  {name}", font=FONT_BOLD).grid(row=i, column=0, sticky="w", pady=3)
+            st = mk_label(box, "not installed", fg=FG_MUTED, font=FONT_SMALL)
+            st.grid(row=i, column=1, sticky="w", padx=(16, 0))
+            self._status[name] = st
+        self.lbl_msg = mk_label(self, "", fg=FG_MUTED, font=FONT_SMALL, wraplength=440,
+                                justify="left")
+        self.lbl_msg.pack(anchor="w", padx=24, pady=(10, 0))
         bar = tk.Frame(self, bg=BG)
-        bar.pack(fill="x", padx=16, pady=(0, 14))
-        mk_btn(bar, "+ Add Tunnel", self._add, bg=SUCCESS).pack(side="left")
-        mk_btn(bar, "Close", self._close).pack(side="right")
-        self.minsize(640, 240)
-        self.refresh()
+        bar.pack(fill="x", padx=24, pady=(14, 16))
+        self.btn_close = mk_btn(bar, "Later", self.destroy)
+        self.btn_close.pack(side="right")
+        self.btn_pages = mk_btn(bar, "Open download pages", self._pages)
+        self.btn_pages.pack(side="right", padx=6)
+        self.btn_install = mk_btn(bar, "Install for me", self._install, bg=SUCCESS, fg="white")
+        self.btn_install.pack(side="right")
+        self.bind("<Escape>", lambda e: self.destroy())
         show_centered(self, app)
-        self.grab_release()  # not modal: the main window stays usable
 
-    def _close(self):
-        self.app._tunnel_windows.pop(self.cid, None)
-        self.destroy()
+    def _pages(self):
+        for _, url in self.missing:
+            self.app._open_url(url)
 
-    def refresh(self):
-        for w in self.rows.winfo_children():
-            w.destroy()
-        conn = self.app.find_conn(self.cid)
-        tunnels = conn.get("tunnels", []) if conn else []
-        if not tunnels:
-            mk_label(self.rows, "No tunnels yet. Click + Add Tunnel to reach a web panel, "
-                     "database or browse through this server.", fg=FG_MUTED,
-                     wraplength=560, justify="left").grid(row=0, column=0, columnspan=4,
-                                                          sticky="w", pady=20)
+    def _set(self, name, text, color):
+        if self.winfo_exists():
+            self._status[name].configure(text=text, fg=color)
+
+    def _install(self):
+        for b in (self.btn_install, self.btn_pages):
+            b.configure(state="disabled", bg=BG_INPUT, fg=FG_MUTED)
+        self.btn_close.configure(text="Close")
+        self.lbl_msg.configure(text="Installing... Click Yes when Windows asks for permission.",
+                               fg=FG_MUTED)
+        names = [n for n, _ in missing_requirements()]
+
+        def work():
+            failed = []
+            for name in names:  # WinFsp first: SSHFS-Win needs it
+                self.app.after(0, self._set, name, "installing...", WARNING)
+                self.app.log(f"[INFO] Installing {name}...\n")
+                try:
+                    out = install_requirement(name)
+                except Exception as e:
+                    out = str(e)
+                if out:
+                    self.app.log("[INSTALL] " + out.replace("\n", "\n[INSTALL] ") + "\n")
+                ok = name not in [n for n, _ in missing_requirements()]
+                if not ok:
+                    failed.append(name)
+                self.app.after(0, self._set, name, "installed" if ok else "not installed",
+                               SUCCESS if ok else DANGER)
+                if not ok:
+                    break
+            self.app.after(0, self._finished, failed)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _finished(self, failed):
+        left = self.app.check_requirements(log_missing=False)
+        if not self.winfo_exists():
             return
-        colors = {"running": SUCCESS, "starting": WARNING, "retrying": WARNING,
-                  "error": DANGER, "stopped": FG_MUTED}
-        for r, t in enumerate(tunnels):
-            state, msg = self.app.tunnels.state(t["id"])
-            dot = tk.Canvas(self.rows, width=12, height=12, bg=BG, highlightthickness=0)
-            dot.create_oval(1, 1, 11, 11, fill=colors.get(state, FG_MUTED), outline="")
-            dot.grid(row=r, column=0, sticky="n", padx=(0, 8), pady=(8, 0))
-            info = tk.Frame(self.rows, bg=BG)
-            info.grid(row=r, column=1, sticky="ew", pady=4)
-            name = mk_label(info, t["name"], font=FONT_BOLD)
-            name.pack(anchor="w")
-            addr = mk_label(info, describe_tunnel(t), fg=FG_MUTED, font=FONT_SMALL)
-            addr.pack(anchor="w")
-            text = {"running": "Running", "starting": "Starting…", "stopped": "Stopped"}.get(
-                state, msg)
-            status = mk_label(info, text, fg=colors.get(state, FG_MUTED), font=FONT_SMALL,
-                              wraplength=330, justify="left")
-            status.pack(anchor="w")
-            if t["type"] == "local" and state == "running":
-                # Clicking the tunnel's text does the same as its Open / Copy button
-                db = t.get("remote_port") in DB_PORTS
-                for w in (info, name, addr, status):
-                    w.configure(cursor="hand2")
-                    w.bind("<Button-1>", lambda e, t=t, db=db: self._open(t, db))
-                    w.bind("<Enter>", lambda e, a=addr: a.configure(fg=ACCENT))
-                    w.bind("<Leave>", lambda e, a=addr: a.configure(fg=FG_MUTED))
-            bf = tk.Frame(self.rows, bg=BG)
-            bf.grid(row=r, column=2, sticky="e", pady=4)
-            active = state in TunnelManager.ACTIVE
-            if t["type"] == "local":
-                db = t.get("remote_port") in DB_PORTS
-                running = state == "running"
-                b = mk_btn(bf, "Copy" if db else "Open", lambda t=t, db=db: self._open(t, db),
-                           bg=SUCCESS if running else BG_INPUT)
-                b.pack(side="left", padx=2)
-                if not running:
-                    b.configure(state="disabled", fg=FG_MUTED)
-            mk_btn(bf, "Stop" if active else "Start",
-                   lambda t=t: self._toggle(t),
-                   bg=DANGER if active else ACCENT).pack(side="left", padx=2)
-            mk_btn(bf, "Edit", lambda t=t: self._edit(t)).pack(side="left", padx=2)
-            mk_btn(bf, "✕", lambda t=t: self._delete(t)).pack(side="left", padx=2)
-
-    def _used_ports(self, exclude_id=None):
-        # Ports this app listens on here (a remote tunnel's port is on the server)
-        return {t["local_port"] for c in self.app._connections
-                for t in c.get("tunnels", [])
-                if t.get("id") != exclude_id and t.get("type") != "remote"}
-
-    def _toggle(self, t):
-        if self.app.tunnels.is_active(t["id"]):
-            self.app.tunnels.stop(t["id"])
+        if not left:
+            self.app.log("[OK] WinFsp and SSHFS-Win installed - ready to connect.\n")
+            self.lbl_msg.configure(text="All set. You can connect your drives now.", fg=SUCCESS)
+            self.btn_close.configure(text="Done", bg=ACCENT, fg="white")
+            self.app._auto_connect()
         else:
-            self.app.tunnels.start(self.app.find_conn(self.cid), t, self.app.log)
-        self.refresh()
-
-    def _open(self, t, db):
-        addr = f"127.0.0.1:{t['local_port']}"
-        if db:
-            self.clipboard_clear()
-            self.clipboard_append(addr)
-            self.app.log(f"[TUNNEL] Copied {addr} for your database client.\n")
-        else:
-            import webbrowser
-            webbrowser.open(f"http://{addr}")
-
-    def _add(self):
-        TunnelDialog(self, {}, self._used_ports(), self._saved)
-
-    def _edit(self, t):
-        TunnelDialog(self, t, self._used_ports(t["id"]), self._saved)
-
-    def _saved(self, t):
-        conn = self.app.find_conn(self.cid)
-        tunnels = conn.setdefault("tunnels", [])
-        for i, old in enumerate(tunnels):
-            if old["id"] == t["id"]:
-                if self.app.tunnels.is_active(t["id"]):  # apply the new settings
-                    self.app.tunnels.stop(t["id"])
-                    self.app.after(1500, lambda: self.app.tunnels.start(conn, t, self.app.log))
-                tunnels[i] = t
-                break
-        else:
-            tunnels.append(t)
-        save_connections(self.app._connections)
-        self.refresh()
-
-    def _delete(self, t):
-        if not messagebox.askyesno("Delete tunnel", f"Delete '{t['name']}'?", parent=self):
-            return
-        self.app.tunnels.forget(t["id"])
-        conn = self.app.find_conn(self.cid)
-        conn["tunnels"] = [x for x in conn.get("tunnels", []) if x["id"] != t["id"]]
-        save_connections(self.app._connections)
-        self.refresh()
-        self.app.on_tunnel_change(self.cid, t["id"])
+            self.lbl_msg.configure(
+                text=f"{' and '.join(failed or [n for n, _ in left])} couldn't be installed "
+                     "automatically (maybe permission was refused, or there's no internet). "
+                     "Try again, or use Open download pages.", fg=DANGER)
+            self.btn_install.configure(state="normal", bg=SUCCESS, fg="white", text="Try again")
+            self.btn_pages.configure(state="normal", bg=BG_INPUT, fg=FG)
 
 class SettingsDialog(tk.Toplevel):
     def __init__(self, parent, settings, on_save):
@@ -1962,7 +1924,8 @@ class ShutdownDialog(tk.Toplevel):
 class DropMenu(tk.Toplevel):
     """Dropdown under a button, drawn in the app's theme (a native tk.Menu
     ignores most of it). items: (label, count, command); a count of 0 shows
-    the item greyed out. Closes on a click elsewhere, Escape or focus loss."""
+    the item greyed out, None shows no count. The count can also be a short
+    text (e.g. "running"). Closes on a click elsewhere, Escape or focus loss."""
 
     def __init__(self, button, items):
         super().__init__(button)
@@ -1972,15 +1935,19 @@ class DropMenu(tk.Toplevel):
         box = tk.Frame(self, bg=BG_CARD)
         box.pack(padx=1, pady=1, fill="both", expand=True)
         for label, count, command in items:
-            row = tk.Frame(box, bg=BG_CARD, cursor="hand2" if count else "")
+            on = count is None or bool(count)
+            if label == "-":
+                tk.Frame(box, bg=BORDER, height=1).pack(fill="x", pady=2)
+                continue
+            row = tk.Frame(box, bg=BG_CARD, cursor="hand2" if on else "")
             row.pack(fill="x")
-            name = tk.Label(row, text=label, bg=BG_CARD, fg=FG if count else FG_MUTED,
+            name = tk.Label(row, text=label, bg=BG_CARD, fg=FG if on else FG_MUTED,
                             font=FONT, anchor="w", padx=12, pady=7)
             name.pack(side="left", fill="x", expand=True)
-            num = tk.Label(row, text=str(count), bg=BG_CARD, fg=FG_MUTED, font=FONT_SMALL,
-                           padx=12)
+            num = tk.Label(row, text="" if count is None else str(count), bg=BG_CARD,
+                           fg=FG_MUTED, font=FONT_SMALL, padx=12)
             num.pack(side="right")
-            if not count:
+            if not on:
                 continue
             parts = (row, name, num)
             def enter(e, parts=parts):
@@ -2149,6 +2116,11 @@ class App(tk.Tk):
         self._drive_state = {}  # drive -> "mounted" / "unmounted" / "hung" / "foreign", set by the poll worker
         self._foreign = {}  # drive -> what else uses that letter, e.g. "magicJack (CD drive)"
         self._wait_free = set()  # connection ids to connect once their letter is free again
+        self._tasks = load_tasks()
+        self._task_running = set()  # task ids running right now
+        self._task_due = {}  # task id -> next scheduled run (epoch seconds)
+        self._tasks_window = None
+        self._seen_state = {}  # connection id -> last poll state, for "when a drive connects"
         self._taken_dialogs = {}  # connection id -> open LetterTakenDialog
         self.tunnels = TunnelManager(self.on_tunnel_change)
         self._tunnel_windows = {}
@@ -2170,6 +2142,7 @@ class App(tk.Tk):
         update.cleanup_old()
         self._update_loop()
         self._upgrade_mounts()
+        self._task_loop()
         self._listen_for_show()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         if self._at_login and self._settings.get("start_minimized", True):
@@ -2222,10 +2195,13 @@ class App(tk.Tk):
         hver = mk_label(hdr, f"v{APP_VERSION}", fg=FG_MUTED, font=FONT_SMALL)
         hver.pack(side="left", padx=(8, 0), pady=(6, 0))
         Tooltip(hver, build_info())
-        mk_btn(hdr,"⚙ Settings", self._open_settings, bg=ACCENT).pack(side="right",padx=(4,12),pady=10)
+        mk_btn(hdr, "⚙ Settings", self._open_settings,
+               bg=ACCENT).pack(side="right", padx=(4, 12), pady=10)
+        mk_btn(hdr, "Tasks", self.open_tasks, bg=BG_INPUT, fg=FG).pack(side="right", padx=4, pady=10)
         self._all_btn = mk_btn(hdr, "All Drives ▾", self._all_drives_menu, bg=BG_INPUT, fg=FG)
         self._all_btn.pack(side="right", padx=4, pady=10)
-        mk_btn(hdr,"+ Add Connection",  self._add, bg=SUCCESS).pack(side="right",padx=4,pady=10)
+        mk_btn(hdr, "+ Add Connection", self._add,
+               bg=SUCCESS).pack(side="right", padx=4, pady=10)
         self._hdr = hdr
 
         # Missing-requirements banner (shown by check_requirements when needed)
@@ -2345,6 +2321,9 @@ class App(tk.Tk):
             mk_btn(self._req_banner, f"Get {name}",
                    lambda u=url: self._open_url(u), bg=WARNING, fg=BG).pack(
                 side="right", padx=4, pady=8)
+        mk_btn(self._req_banner, "Install for me",
+               lambda: self.show_requirements_dialog(missing_requirements()),
+               bg=SUCCESS).pack(side="right", padx=4, pady=8)
         self._req_banner.pack(fill="x", side="top", after=self._hdr)
 
         for name, url in (missing if log_missing else []):
@@ -2358,15 +2337,13 @@ class App(tk.Tk):
                                 "You're ready to connect.", parent=self)
 
     def show_requirements_dialog(self, missing):
-        lines = "\n".join(f"  {i}. {name}  -  {url}"
-                          for i, (name, url) in enumerate(missing, 1))
-        if messagebox.askyesno(
-                "Missing Requirements",
-                "This app can't mount drives until these are installed"
-                f"{' (in this order)' if len(missing) > 1 else ''}:\n\n{lines}\n\n"
-                "Open the download page(s) now?", icon="warning", parent=self):
-            for _, url in missing:
-                self._open_url(url)
+        if not missing:
+            return
+        w = getattr(self, "_req_dialog", None)
+        if w and w.winfo_exists():
+            w.lift()
+            return
+        self._req_dialog = RequirementsDialog(self, missing)
 
     def _open_url(self, url):
         import webbrowser
@@ -2445,6 +2422,44 @@ class App(tk.Tk):
 
     def find_conn(self, cid):
         return next((c for c in self._connections if c["id"] == cid), None)
+
+    def tunnel_menu(self, cid, button):
+        """Right-click on a card's Tunnels button: open a tunnel (starting it if
+        needed) without opening the Tunnels window. Start/stop is in the window."""
+        conn = self.find_conn(cid)
+        if not conn:
+            return
+        tunnels = conn.get("tunnels", [])
+        items = []
+        for t in tunnels:
+            if t["type"] == "local":
+                db = t.get("remote_port") in DB_PORTS
+                items.append((f"{'Copy address of' if db else 'Open'} {t['name']}", None,
+                              lambda t=t, db=db: self.open_tunnel(cid, t, db)))
+        if items:
+            items.append(("-", None, None))
+        items.append(("Manage Tunnels..." if tunnels else "Add a Tunnel...", None,
+                      lambda: self.open_tunnels(cid)))
+        DropMenu(button, items)
+
+    def open_tunnel(self, cid, t, db=False, tries=0):
+        """Open a local tunnel in the browser (or copy a database tunnel's
+        address), starting it first if it isn't running."""
+        state = self.tunnels.state(t["id"])[0]
+        if state != "running":
+            if tries == 0:
+                self.tunnels.start(self.find_conn(cid), t, self.log)
+            if tries < 50 and (tries == 0 or state in TunnelManager.ACTIVE):
+                self.after(300, self.open_tunnel, cid, t, db, tries + 1)
+            return
+        addr = f"127.0.0.1:{t['local_port']}"
+        if db:
+            self.clipboard_clear()
+            self.clipboard_append(addr)
+            self.log(f"[TUNNEL] Copied {addr} for your database client.\n")
+        else:
+            import webbrowser
+            webbrowser.open(f"http://{addr}")
 
     def open_tunnels(self, cid):
         w = self._tunnel_windows.get(cid)
@@ -3026,7 +3041,140 @@ class App(tk.Tk):
             if card:
                 card.set_space(drive_space.get(card.conn["drive_letter"]) if state == "mounted" else None,
                                self._ping.get(cid))
+            # "When a drive connects" tasks: only on a real change from
+            # unmounted to mounted, not for drives already up at app start.
+            prev = self._seen_state.get(cid)
+            self._seen_state[cid] = state
+            if state == "mounted" and prev == "unmounted":
+                for t in self._tasks:
+                    if t["trigger"] == "connect" and t["conn_id"] == cid and t["type"] != "todo":
+                        self.run_task(t["id"], auto=True)
         self._refresh_tray()
+
+    # Tasks
+
+    def open_tasks(self):
+        w = self._tasks_window
+        if w and w.winfo_exists():
+            w.deiconify()
+            w.lift()
+            return
+        self._tasks_window = TasksWindow(self)
+
+    def _refresh_tasks(self):
+        w = self._tasks_window
+        if w and w.winfo_exists():
+            w.refresh()
+
+    def find_task(self, tid):
+        return next((t for t in self._tasks if t["id"] == tid), None)
+
+    def save_task(self, task):
+        for i, t in enumerate(self._tasks):
+            if t["id"] == task["id"]:
+                self._tasks[i] = task
+                break
+        else:
+            self._tasks.append(task)
+        self._task_due.pop(task["id"], None)  # schedule may have changed
+        save_tasks(self._tasks)
+        self._refresh_tasks()
+
+    def delete_task(self, tid):
+        self._tasks = [t for t in self._tasks if t["id"] != tid]
+        self._task_due.pop(tid, None)
+        save_tasks(self._tasks)
+        self._refresh_tasks()
+
+    def set_task_done(self, tid, done):
+        t = self.find_task(tid)
+        if t:
+            t["done"] = done
+            save_tasks(self._tasks)
+            self._refresh_tasks()
+
+    def run_task(self, tid, auto=False):
+        """Run a task in a worker thread. auto: started by its trigger."""
+        t = self.find_task(tid)
+        if not t or t["type"] == "todo" or tid in self._task_running:
+            return
+        t = dict(t)
+        self._task_running.add(tid)
+        self._refresh_tasks()
+        self.log(f"[TASK] Running '{t['name']}'...\n")
+
+        def work():
+            try:
+                ok, out = self._do_task(t)
+            except Exception as e:
+                ok, out = False, f"{type(e).__name__}: {e}"
+            self.after(0, self._task_done, tid, ok, out, auto)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _do_task(self, t):
+        if t["type"] == "command":
+            conn = self.find_conn(t["conn_id"])
+            if not conn:
+                return False, "The server for this task was deleted. Edit the task."
+            return run_command(conn, t["command"],
+                               prompt=prompt_from_thread(self, _conn_label(conn)))
+        if t["type"] == "program":
+            return run_program(t["command"], t["workdir"], t["wait"])
+        if t["type"] == "copy":
+            # A From or To folder on one of our drives: connect that drive first.
+            for path in (t["src"], t["dst"]):
+                drive = drive_of(path)
+                conn = next((c for c in self._connections if c["drive_letter"] == drive), None)
+                if conn and not self._ours_mounted(conn):
+                    if drive in self._foreign:
+                        return False, f"{drive} is used by {self._foreign[drive]}, not {conn['name']}."
+                    self.log(f"[TASK] Connecting {conn['name']} ({drive}) first...\n")
+                    self.set_card_status(conn["id"], "connecting")
+                    ok = connect(conn, log=self.log)
+                    self.set_card_status(conn["id"], "connected" if ok else "disconnected")
+                    if not ok:
+                        return False, f"Couldn't connect {conn['name']} ({drive})."
+            return run_copy(t["src"], t["dst"], t["mode"])
+        return False, "Nothing to run."
+
+    def _task_done(self, tid, ok, out, auto):
+        self._task_running.discard(tid)
+        t = self.find_task(tid)
+        if t:
+            t.update(last_run=time.time(), last_ok=ok, last_output=out[-20000:])
+            save_tasks(self._tasks)
+            self.log(f"[TASK] '{t['name']}' {'finished' if ok else 'failed'}.\n")
+            if (auto and not ok) or t["notify"]:
+                self._notify(f"Task '{t['name']}' {'finished' if ok else 'failed'}.")
+        self._refresh_tasks()
+
+    def _task_loop(self):
+        """Runs "when the app starts" tasks once, then scheduled tasks when due."""
+        def due():
+            now = time.time()
+            for t in list(self._tasks):
+                if t["trigger"] != "schedule" or t["type"] == "todo":
+                    continue
+                when = self._task_due.get(t["id"])
+                if when is None:
+                    self._task_due[t["id"]] = next_run(t, now)
+                elif now >= when:
+                    self._task_due[t["id"]] = next_run(t, now)
+                    self.run_task(t["id"], auto=True)
+        def loop():
+            if self._stop.wait(15):  # let drives connect first
+                return
+            try:
+                self.after(0, lambda: [self.run_task(t["id"], auto=True) for t in self._tasks
+                                       if t["trigger"] == "start" and t["type"] != "todo"])
+            except RuntimeError:
+                return
+            while not self._stop.wait(20):
+                try:
+                    self.after(0, due)
+                except RuntimeError:
+                    return
+        threading.Thread(target=loop, daemon=True).start()
 
     def _listen_for_show(self):
         """A second launch signals this event; bring this window to the front."""
@@ -3289,3 +3437,7 @@ class App(tk.Tk):
             self._tray_icon.stop()
             self._tray_icon = None
         self.destroy()
+
+# Last, so these modules can copy every helper defined above
+from .ui_tasks import OutputDialog, TaskDialog, TasksWindow  # noqa: E402
+from .ui_tunnels import TunnelDialog, TunnelsWindow  # noqa: E402

@@ -111,6 +111,79 @@ class PassphrasePrompt(unittest.TestCase):
         self.assertTrue(_prompt_names_key(f"Enter passphrase for key '{cut}': ", long_path))
 
 
+class Tasks(unittest.TestCase):
+    def test_next_run(self):
+        import datetime
+        from kamen import tasks
+        base = datetime.datetime(2026, 1, 5, 10, 0).timestamp()  # a Monday, 10:00
+        t = dict(tasks.new_task(), trigger="schedule", every="minutes", minutes=15)
+        self.assertEqual(tasks.next_run(t, base) - base, 15 * 60)
+        t.update(every="daily", time="03:00")
+        self.assertEqual(datetime.datetime.fromtimestamp(tasks.next_run(t, base)),
+                         datetime.datetime(2026, 1, 6, 3, 0))
+        t.update(time="11:30")
+        self.assertEqual(datetime.datetime.fromtimestamp(tasks.next_run(t, base)),
+                         datetime.datetime(2026, 1, 5, 11, 30))
+        t.update(every="weekly", day=0, time="09:00")  # Monday 09:00 already passed
+        self.assertEqual(datetime.datetime.fromtimestamp(tasks.next_run(t, base)),
+                         datetime.datetime(2026, 1, 12, 9, 0))
+        t.update(time="bad")
+        self.assertIsNone(tasks.next_run(t, base))
+
+    def test_robocopy_args(self):
+        from kamen import tasks
+        self.assertIn("/XO", tasks.robocopy_args("a", "b", "update"))
+        self.assertIn("/MIR", tasks.robocopy_args("a", "b", "mirror"))
+        self.assertNotIn("/E", tasks.robocopy_args("a", "b", "mirror"))
+        self.assertIn("/E", tasks.robocopy_args("a", "b", "copy"))
+
+    def test_copy_and_program(self):
+        import os
+        from kamen import tasks
+        with tempfile.TemporaryDirectory() as d:
+            src, dst = os.path.join(d, "src"), os.path.join(d, "dst")
+            os.makedirs(os.path.join(src, "sub"))
+            with open(os.path.join(src, "sub", "f.txt"), "w") as f:
+                f.write("hi")
+            ok, out = tasks.run_copy(src, dst, "copy")
+            self.assertTrue(ok, out)
+            self.assertTrue(os.path.isfile(os.path.join(dst, "sub", "f.txt")))
+            ok, out = tasks.run_copy(os.path.join(d, "missing"), dst, "copy")
+            self.assertFalse(ok)
+            ok, out = tasks.run_program("echo hello", d)
+            self.assertTrue(ok)
+            self.assertIn("hello", out)
+            ok, out = tasks.run_program("exit 3", d)
+            self.assertFalse(ok)
+
+
+class InstallRequirements(unittest.TestCase):
+    def test_falls_back_to_download(self):
+        from unittest import mock
+        calls = []
+        with mock.patch.object(mounts, "find_winget", return_value="winget.exe"), \
+             mock.patch.object(mounts, "winget_install",
+                               side_effect=lambda n: calls.append("winget") or (False, "")), \
+             mock.patch.object(mounts, "direct_install",
+                               side_effect=lambda n: calls.append("direct") or (True, "")), \
+             mock.patch.object(mounts, "missing_requirements",
+                               return_value=[("WinFsp", "u")]):
+            mounts.install_requirement("WinFsp")
+        self.assertEqual(calls, ["winget", "direct"])
+
+    def test_winget_enough(self):
+        from unittest import mock
+        calls = []
+        with mock.patch.object(mounts, "find_winget", return_value="winget.exe"), \
+             mock.patch.object(mounts, "winget_install",
+                               side_effect=lambda n: calls.append("winget") or (True, "")), \
+             mock.patch.object(mounts, "direct_install",
+                               side_effect=lambda n: calls.append("direct") or (True, "")), \
+             mock.patch.object(mounts, "missing_requirements", return_value=[]):
+            mounts.install_requirement("WinFsp")
+        self.assertEqual(calls, ["winget"])
+
+
 class ForeignDrive(unittest.TestCase):
     def test_free_letter_is_not_foreign(self):
         free = next(f"{c}:" for c in "QRSTUVWXYZ" if not winutil.letter_present(f"{c}:"))
@@ -214,6 +287,17 @@ class Update(unittest.TestCase):
         outside.write_bytes(b"x")
         self.cleanup(["--updated", "--remove-old=" + str(outside)])
         self.assertTrue(outside.exists())
+
+class Https(unittest.TestCase):
+    def test_trusts_certifi_too(self):
+        # A fresh Windows has few root certificates stored; certifi fills the gap
+        import certifi, ssl, urllib.request
+        ctx = config.https_context()
+        self.assertGreater(ctx.cert_store_stats()["x509_ca"], 100)
+        self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
+        handlers = [h for h in urllib.request._opener.handlers
+                    if isinstance(h, urllib.request.HTTPSHandler)]
+        self.assertTrue(handlers)
 
 
 if __name__ == "__main__":

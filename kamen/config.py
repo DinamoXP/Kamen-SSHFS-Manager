@@ -27,6 +27,27 @@ def _load_version():
 
 APP_VERSION = _load_version()
 
+def https_context():
+    """Trust Windows' certificates plus certifi's list. A new or old Windows has
+    only a few root certificates stored and fetches the rest when its own
+    programs need them, which Python never triggers, so GitHub fails there."""
+    import ssl
+    ctx = ssl.create_default_context()
+    try:
+        import certifi
+        ctx.load_verify_locations(certifi.where())
+    except Exception:
+        pass
+    return ctx
+
+def _setup_https():
+    """Make every urlopen/urlretrieve in the app use https_context()."""
+    import urllib.request
+    urllib.request.install_opener(urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=https_context())))
+
+_setup_https()
+
 def build_info():
     """Text for the version tooltip. A frozen build's exe file is written at the
     end of the PyInstaller run, so its timestamp is the build date/time (and it

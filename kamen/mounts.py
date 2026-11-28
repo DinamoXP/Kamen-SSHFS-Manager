@@ -145,6 +145,74 @@ def missing_requirements():
         missing.append(("SSHFS-Win", SSHFS_WIN_URL))
     return missing
 
+WINGET_IDS = {"WinFsp": "WinFsp.WinFsp", "SSHFS-Win": "SSHFS-Win.SSHFS-Win"}
+
+def find_winget():
+    """Windows' package manager (part of Windows 10/11 via App Installer)."""
+    import shutil
+    return shutil.which("winget")
+
+def winget_install(name):
+    """Install WinFsp or SSHFS-Win with winget. Windows asks for admin rights
+    (UAC) for the driver installer. Returns (ok, output)."""
+    winget = find_winget()
+    if not winget:
+        return False, "winget not found"
+    p = subprocess.run([winget, "install", "--id", WINGET_IDS[name], "--exact", "--silent",
+                        "--accept-package-agreements", "--accept-source-agreements",
+                        "--disable-interactivity"],
+                       capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+    out = (p.stdout + p.stderr).decode("utf-8", "replace")
+    # Keep the readable lines: winget also prints progress bars and spinners
+    lines = [l.strip() for l in out.replace("\r", "\n").splitlines()
+             if l.strip() and not set(l.strip()) <= set("-\\|/ █▒")]
+    return p.returncode == 0, "\n".join(lines)
+
+REQUIREMENT_REPOS = {"WinFsp": "winfsp/winfsp", "SSHFS-Win": "winfsp/sshfs-win"}
+
+def direct_install(name):
+    """Download the official installer (.msi) from the project's latest GitHub
+    release and run it. Windows asks for permission. Returns (ok, output)."""
+    import json, tempfile, urllib.request
+    req = urllib.request.Request(
+        f"https://api.github.com/repos/{REQUIREMENT_REPOS[name]}/releases/latest",
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "Kamen-SSHFS-Manager"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        assets = json.load(r).get("assets", [])
+    msis = [a for a in assets if a["name"].lower().endswith(".msi")]
+    arch = "x64" if os.environ.get("PROCESSOR_ARCHITECTURE", "").endswith("64") else "x86"
+    msi = next((a for a in msis if arch in a["name"].lower()), msis[0] if msis else None)
+    if not msi:
+        return False, f"No installer found in the latest {name} release."
+    path = os.path.join(tempfile.gettempdir(), msi["name"])
+    urllib.request.urlretrieve(msi["browser_download_url"], path)
+    # /passive: progress bar only, no questions. 3010 = installed, restart suggested.
+    p = subprocess.run(["msiexec", "/i", path, "/passive", "/norestart"],
+                       creationflags=subprocess.CREATE_NO_WINDOW)
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    return p.returncode in (0, 3010), f"{msi['name']}: msiexec exit code {p.returncode}"
+
+def install_requirement(name):
+    """Install WinFsp or SSHFS-Win: with winget when it's there, otherwise (or
+    if that didn't work) by downloading the official installer. Returns output."""
+    out = []
+    if find_winget():
+        try:
+            out.append(winget_install(name)[1])
+        except Exception as e:
+            out.append(f"winget: {e}")
+        if name not in [n for n, _ in missing_requirements()]:
+            return "\n".join(out)
+        out.append("winget didn't install it, downloading the installer instead...")
+    try:
+        out.append(direct_install(name)[1])
+    except Exception as e:
+        out.append(f"Download failed: {e}")
+    return "\n".join(o for o in out if o)
+
 def sshfs_host(host):
     """Host for sshfs's user@host:path syntax: IPv6 literals (which contain
     colons, e.g. fe80::1%12) must be bracketed or sshfs splits them wrongly."""

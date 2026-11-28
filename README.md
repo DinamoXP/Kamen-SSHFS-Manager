@@ -10,25 +10,30 @@ connections, 2FA support and automatic reconnect.
 **[Download the latest version](https://github.com/DinamoXP/Kamen-SSHFS-Manager/releases/latest/download/Kamen.SSHFS.Manager.exe)** (Windows 10/11, 64-bit) and see
 [Install](#install).
 
-![Kamen SSHFS Manager main window with three connections, two of them mounted](images/main.jpg?v=4029e629)
+![Kamen SSHFS Manager main window with three connections, two of them mounted](images/main.jpg?v=79db2ab5)
 
 ## Install
 
-1. Install **WinFsp**, then **SSHFS-Win** (in this order):
-   - WinFsp: https://github.com/winfsp/winfsp/releases
-   - SSHFS-Win: https://github.com/winfsp/sshfs-win/releases
-2. Download **[Kamen.SSHFS.Manager.exe](https://github.com/DinamoXP/Kamen-SSHFS-Manager/releases/latest/download/Kamen.SSHFS.Manager.exe)** from the
+1. Download **[Kamen.SSHFS.Manager.exe](https://github.com/DinamoXP/Kamen-SSHFS-Manager/releases/latest/download/Kamen.SSHFS.Manager.exe)** from the
    [latest release](https://github.com/DinamoXP/Kamen-SSHFS-Manager/releases/latest).
-3. Put it in a folder of your own, e.g. `Documents\Kamen SSHFS Manager`. Use
+2. Put it in a folder of your own, e.g. `Documents\Kamen SSHFS Manager`. Use
    a folder you can write to (not `Program Files`), so **Update Now** can
    replace it later.
-4. Start it. The first time, Windows SmartScreen may say "Windows protected
+3. Start it. The first time, Windows SmartScreen may say "Windows protected
    your PC" because the app isn't code-signed yet: click **More info**, then
    **Run anyway** (see [Code Signing](#code-signing)).
+4. The app needs **WinFsp** and **SSHFS-Win**. If they're missing, it offers
+   to install them: click **Install for me** and allow the Windows permission
+   prompts (WinFsp is a driver). The app downloads and installs both by
+   itself (with Windows' own installer winget, or straight from their
+   official releases), so there's nothing else to download.
 
-There's no installer: the exe is the whole app. It starts with Windows from
-then on (you can turn that off in Settings). If WinFsp or SSHFS-Win is
-missing, the app shows a banner with download links.
+There's no installer for the app itself: the exe is the whole app. It starts
+with Windows from then on (you can turn that off in Settings).
+
+To install them yourself instead, WinFsp first:
+- WinFsp: https://github.com/winfsp/winfsp/releases
+- SSHFS-Win: https://github.com/winfsp/sshfs-win/releases
 
 The **SSH** button uses Windows' built-in OpenSSH Client (Settings, Apps,
 Optional features), which is installed by default on current Windows 10/11.
@@ -80,7 +85,8 @@ From then on, updates come through **Update Now**.
 - **Jump host** support: reach a server through another server
   (see [Jump Host](#jump-host))
 - Interactive login (2FA codes) and a **Trust this server?** prompt for new host keys
-- Passwords encrypted with Windows DPAPI (readable only by your Windows account)
+- Passwords encrypted with Windows DPAPI (readable only by your Windows account);
+  the eye icon in a password field shows what you typed
 - **Test Connection** and a remote folder browser for picking the remote path
 - Drive letter selector (D: - Z:), custom port, extra SSHFS arguments
 - **SSH** button: opens a terminal session in the connection's remote folder,
@@ -88,16 +94,22 @@ From then on, updates come through **Update Now**.
 - **SSH tunnels**: reach web panels and databases on the server, or browse
   through it with a SOCKS proxy, or let the server reach this PC with a
   remote tunnel (see [SSH Tunnels](#ssh-tunnels))
+- **Tasks**: to-dos, server commands, programs and folder copies, run by
+  hand, on a schedule, when a drive connects or when the app starts
+  (see [Tasks](#tasks))
 - Connect automatically when the app starts (per connection)
 - Start with Windows, minimized to the tray (on by default); auto-connect
   retries for about a minute at login while the network comes up
 - Dark and light themes
 - Debug log panel with Copy Log / Clear Log (can be turned off in Settings)
-- Checks for WinFsp and SSHFS-Win on startup and links to the downloads
+- Checks for WinFsp and SSHFS-Win on startup and downloads and installs
+  them for you with one click (**Install for me**)
 - Exit disconnects all drives in the background with a progress window
 - Open a mounted drive in Explorer by clicking its drive tile (e.g. `I:\`)
-- Free space and ping time shown on each connected drive's card (the ping
-  is a normal ICMP ping every 30 s; nothing appears if the server blocks ping)
+- Disk usage at a glance: a connected drive's tile fills up like a tank and
+  turns from green to red as the drive gets full, next to "71% used". Hover
+  over it for used, free and total space and the ping time (a normal ICMP
+  ping every 30 s; no ping is shown if the server blocks it)
 - Tray menu: connect, disconnect, open drives and start tunnels without
   opening the window; the tray icon gets an orange dot if a drive hangs
 - Right-click a card for more actions, including **Duplicate** and
@@ -198,7 +210,7 @@ number of your network adapter (shown by `ipconfig`, e.g. `%12`).
 | Method        | Notes                                                        |
 |---------------|--------------------------------------------------------------|
 | Password      | Saved encrypted (DPAPI). Used for mounting and the SSH button. |
-| Private Key   | Path to your `.pem` or OpenSSH key file. A key with a passphrase asks for it in a popup, or tick **Remember passphrase** to save it encrypted (DPAPI) |
+| Private Key   | Path to your `.pem` or OpenSSH key file. A key with a passphrase asks for it in a popup, or tick **Remember** next to Passphrase to save it encrypted (DPAPI) |
 | Ask Each Time | A popup asks for the password on each connect; never saved   |
 
 ### Key Login
@@ -339,11 +351,13 @@ window to the front.
 ## SSH Tunnels
 
 Click **Tunnels** on a connection's card to manage its tunnels. The button shows
-how many are running, e.g. **Tunnels (2)**.
+how many are running, e.g. **Tunnels (2)**. Right-click it to open a tunnel
+straight away (**Open**, or **Copy address** for a database), without opening
+the Tunnels window. Open starts the tunnel first if needed.
 
 | Tunnels | + Add Tunnel |
 |:---:|:---:|
-| ![Tunnels window with a web panel, a database and a SOCKS proxy](images/tunnels.jpg?v=398ddbf4) | ![New Tunnel dialog with the Portainer preset](images/new_tunnel.jpg?v=a3d77d83) |
+| ![Tunnels window with a web panel, a database and a SOCKS proxy](images/tunnels.jpg?v=fc931af7) | ![New Tunnel dialog with the Portainer preset](images/new_tunnel.jpg?v=a3d77d83) |
 
 | Type | Use it for | How to use it |
 |---|---|---|
@@ -366,6 +380,27 @@ another machine the server can reach (e.g. a NAS on the server's network).
 - Tunnels only listen on `127.0.0.1`, so other devices on your network can't
   use them.
 - Tunnels stop when the app exits, including if it crashes.
+
+## Tasks
+
+Click **Tasks** in the header for a list of tasks, and **+ Add Task** to add one.
+
+![Tasks window with a to-do, server commands, a folder copy and a program](images/tasks_list.jpg?v=23b2ef78)
+
+| Type | What it does |
+|---|---|
+| **To-do** | A note or reminder with a checkbox, optionally for one server |
+| **Server command** | Runs a command on a server over SSH (e.g. `sudo apt update`), with the same login as the drive |
+| **Program on this PC** | Starts a program or script, e.g. `code W:\var\www` to open a project in VS Code |
+| **Copy files** | Copies folders with Windows' robocopy: everything, only new and changed files, or a mirror (which also deletes files in To that aren't in From). A folder on one of your drives connects that drive first |
+
+Each task (except to-dos) runs **only when you click Run**, **on a schedule**
+(every N minutes, daily or weekly at a time), **when a drive connects** or
+**when the app starts**. Schedules only run while the app is running.
+
+The list shows when each task last ran and whether it worked; click that line
+for the full output. A task that runs by itself and fails shows a tray
+notification. Tasks are saved in `tasks.json` in the app's settings folder.
 
 ## Troubleshooting
 
@@ -424,6 +459,7 @@ All in `%APPDATA%\kamen-sshfs-manager\`:
 |--------------------|---------------------------------------------------|
 | `connections.json` | Saved connections (passwords DPAPI-encrypted)     |
 | `settings.json`    | Theme, logging and startup preferences            |
+| `tasks.json`       | Tasks and the output of their last run            |
 | `kamen.log`        | Log file (rotated at 1 MB, last 3 kept; never contains passwords) |
 | `askpass.cmd`      | Helper used by the SSH button when run from source |
 | `keys\`            | Login keys created by **Key login...**            |
