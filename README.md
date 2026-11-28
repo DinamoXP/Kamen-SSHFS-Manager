@@ -10,7 +10,7 @@ connections, 2FA support and automatic reconnect.
 **[Download the latest version](https://github.com/DinamoXP/Kamen-SSHFS-Manager/releases/latest/download/Kamen.SSHFS.Manager.exe)** (Windows 10/11, 64-bit) and see
 [Install](#install).
 
-![Kamen SSHFS Manager main window with three connections, two of them mounted](images/main.jpg?v=79db2ab5)
+![Kamen SSHFS Manager main window with three connections, two of them mounted](images/main.jpg?v=3d79eaad)
 
 ## Install
 
@@ -62,7 +62,7 @@ From then on, updates come through **Update Now**.
 
 | New connection | Settings |
 |:---:|:---:|
-| ![Connection details form with Test Connection and Browse](images/new_connection.jpg?v=9376647e) | ![Settings window with theme, startup, connections, drive, update and logging options](images/settings.jpg?v=732860a1) |
+| ![Connection details form with Test Connection and Browse](images/new_connection.jpg?v=e1404e7b) | ![Settings window with theme, startup, connections, drive, update and logging options](images/settings.jpg?v=b1a87aed) |
 
 ## Features
 
@@ -357,7 +357,7 @@ the Tunnels window. Open starts the tunnel first if needed.
 
 | Tunnels | + Add Tunnel |
 |:---:|:---:|
-| ![Tunnels window with a web panel, a database and a SOCKS proxy](images/tunnels.jpg?v=fc931af7) | ![New Tunnel dialog with the Portainer preset](images/new_tunnel.jpg?v=a3d77d83) |
+| ![Tunnels window with a web panel, a database and a SOCKS proxy](images/tunnels.jpg?v=fc931af7) | ![New Tunnel dialog with the Portainer preset](images/new_tunnel.jpg?v=f2f95159) |
 
 | Type | Use it for | How to use it |
 |---|---|---|
