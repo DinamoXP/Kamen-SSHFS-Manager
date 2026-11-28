@@ -10,7 +10,7 @@ connections, 2FA support and automatic reconnect.
 **[Download the latest version](https://github.com/DinamoXP/Kamen-SSHFS-Manager/releases/latest/download/Kamen.SSHFS.Manager.exe)** (Windows 10/11, 64-bit) and see
 [Install](#install).
 
-![Kamen SSHFS Manager main window with three connections, two of them mounted](images/main.jpg?v=3d79eaad)
+![Kamen SSHFS Manager main window with three mounted drives and their disk usage](images/main.jpg?v=3d79eaad)
 
 ## Install
 
